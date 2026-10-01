@@ -25,6 +25,7 @@ switch_connected=True
 last_error=""
 last_request_time=0.0
 
+# Read-only ASCOM Switch channels. Values come from Monitor v7's JSON state.
 CHANNELS=[
     ("State of Charge (%)", "Battery state of charge", 0.0, 100.0, 1.0, "soc"),
     ("Battery Voltage (V)", "Battery terminal voltage", 0.0, 20.0, 0.01, "voltage"),
@@ -51,9 +52,15 @@ def read_state():
         if age==999999.0:
             try: age=max(0.0,time.time()-STATE_FILE.stat().st_mtime)
             except Exception: pass
+        # Fail safe: stale data is unsafe even if the last state said NORMAL.
         safe=(st in ("NORMAL","LOW")) and age <= STALE_SECONDS
-        display_state="STALE" if age > STALE_SECONDS else st
-        d["_age_seconds"]=age; d["_effective_safe"]=safe; d["_display_state"]=display_state
+        if age > STALE_SECONDS:
+            display_state="STALE"
+        else:
+            display_state=st
+        d["_age_seconds"]=age
+        d["_effective_safe"]=safe
+        d["_display_state"]=display_state
         last_error=""
         return safe,display_state,d
     except Exception as e:
@@ -62,15 +69,20 @@ def read_state():
 
 def telemetry_value(idx,d):
     key=CHANNELS[idx][5]
-    if key=="power": return float(d.get("voltage",0.0))*float(d.get("current",0.0))
+    if key=="power":
+        return float(d.get("voltage",0.0))*float(d.get("current",0.0))
     if key=="runtime_hours":
-        v=d.get("estimated_runtime_minutes"); return 0.0 if v is None else float(v)/60.0
+        v=d.get("estimated_runtime_minutes")
+        return 0.0 if v is None else float(v)/60.0
     if key=="safe_numeric": return 1.0 if d.get("_effective_safe",False) else 0.0
     if key=="data_age": return min(3600.0,float(d.get("_age_seconds",3600.0)))
     if key=="discharge_mos": return 1.0 if d.get("discharge_mos") is True else 0.0
-    v=d.get(key); return 0.0 if v is None else float(v)
+    v=d.get(key)
+    return 0.0 if v is None else float(v)
 
 def request_discharge(state):
+    # Atomic local IPC to WattCycle Monitor v8. The monitor owns BLE and
+    # verifies the MOS state directly from the BMS after sending the command.
     COMMAND_FILE.parent.mkdir(parents=True, exist_ok=True)
     payload={"id":f"{time.time_ns()}","created":time.time(),"control":"discharge","state":bool(state),"source":"NINA_ASCOM_Switch"}
     tmp=COMMAND_FILE.with_suffix(".tmp")
@@ -98,7 +110,8 @@ class H(BaseHTTPRequestHandler):
     def params(self):
         p=urlparse(self.path);q=parse_qs(p.query)
         if self.command=="PUT":
-            n=int(self.headers.get("Content-Length","0") or 0);body=self.rfile.read(n).decode(errors="ignore");q.update(parse_qs(body))
+            n=int(self.headers.get("Content-Length","0") or 0);body=self.rfile.read(n).decode(errors="ignore")
+            q.update(parse_qs(body))
         return p.path.lower(),q
     def sendj(self,obj,code=200):
         b=json.dumps(obj).encode();self.send_response(code);self.send_header("Content-Type","application/json");self.send_header("Content-Length",str(len(b)));self.end_headers();self.wfile.write(b)
@@ -113,7 +126,9 @@ class H(BaseHTTPRequestHandler):
         if path=="/management/v1/configureddevices":
             return self.sendj(envelope([
                 {"DeviceName":SAFETY_NAME,"DeviceType":"SafetyMonitor","DeviceNumber":0,"UniqueID":SAFETY_UID},
-                {"DeviceName":SWITCH_NAME,"DeviceType":"Switch","DeviceNumber":0,"UniqueID":SWITCH_UID}],client=client))
+                {"DeviceName":SWITCH_NAME,"DeviceType":"Switch","DeviceNumber":0,"UniqueID":SWITCH_UID}
+            ],client=client))
+
         sb="/api/v1/safetymonitor/0/"
         if path.startswith(sb):
             prop=path[len(sb):]
@@ -125,6 +140,7 @@ class H(BaseHTTPRequestHandler):
             vals={"name":SAFETY_NAME,"description":"WattCycle battery protection state","driverinfo":"WattCycle JSON to ASCOM Alpaca SafetyMonitor bridge","driverversion":"3.0","interfaceversion":1,"supportedactions":[]}
             if prop in vals:return self.sendj(envelope(vals[prop],client=client))
             return self.sendj(envelope(err=1024,msg="Unknown member",client=client),404)
+
         wb="/api/v1/switch/0/"
         if path.startswith(wb):
             prop=path[len(wb):]
@@ -136,7 +152,8 @@ class H(BaseHTTPRequestHandler):
             idx=parse_id(q)
             if prop in ("getswitch","getswitchvalue","getswitchname","getswitchdescription","canwrite","minswitchvalue","maxswitchvalue","switchstep"):
                 if idx<0 or idx>=len(CHANNELS):return self.sendj(envelope(err=1025,msg="Invalid switch ID",client=client))
-                name,desc,mn,mx,step,key=CHANNELS[idx]; _,_,d=read_state();v=telemetry_value(idx,d)
+                name,desc,mn,mx,step,key=CHANNELS[idx]
+                _,_,d=read_state();v=telemetry_value(idx,d)
                 if prop=="getswitch":value=bool(v>0.5)
                 elif prop=="getswitchvalue":value=max(mn,min(mx,v))
                 elif prop=="getswitchname":value=name
@@ -149,13 +166,18 @@ class H(BaseHTTPRequestHandler):
             if prop in ("setswitch","setswitchvalue"):
                 idx=parse_id(q)
                 if idx<0 or idx>=len(CHANNELS):return self.sendj(envelope(err=1025,msg="Invalid switch ID",client=client))
-                if CHANNELS[idx][5] != "discharge_mos":return self.sendj(envelope(err=1026,msg="This telemetry channel is read-only",client=client))
-                if prop=="setswitch": desired=str(qval(q,"State","false")).lower() in ("true","1","yes","on")
+                if CHANNELS[idx][5] != "discharge_mos":
+                    return self.sendj(envelope(err=1026,msg="This telemetry channel is read-only",client=client))
+                if prop=="setswitch":
+                    raw=str(qval(q,"State","false")).lower(); desired=raw in ("true","1","yes","on")
                 else:
                     try: desired=float(qval(q,"Value","0")) >= 0.5
-                    except:return self.sendj(envelope(err=1025,msg="Invalid switch value",client=client))
-                try: request_discharge(desired); return self.sendj(envelope(client=client))
-                except Exception as e:return self.sendj(envelope(err=1026,msg=f"Unable to queue Rig Power command: {e}",client=client))
+                    except: return self.sendj(envelope(err=1025,msg="Invalid switch value",client=client))
+                try:
+                    request_discharge(desired)
+                    return self.sendj(envelope(client=client))
+                except Exception as e:
+                    return self.sendj(envelope(err=1026,msg=f"Unable to queue Rig Power command: {e}",client=client))
             return self.sendj(envelope(err=1024,msg="Unknown member",client=client),404)
         return self.sendj(envelope(err=1024,msg="Unknown endpoint",client=client),404)
 
@@ -190,13 +212,15 @@ ttk.Label(frm,text=f"Fail-safe: state data older than {int(STALE_SECONDS)} secon
 
 def tick():
     safe,st,d=read_state();state.set(st);safev.set("SAFE" if safe and safety_connected else "UNSAFE")
-    socv.set(f"{d.get('soc','--')}%");voltv.set(f"{float(d.get('voltage',0)):.2f} V" if 'voltage' in d else "--")
+    socv.set(f"{d.get('soc','--')}%")
+    voltv.set(f"{float(d.get('voltage',0)):.2f} V" if 'voltage' in d else "--")
     if 'voltage' in d and 'current' in d:
         p=float(d['voltage'])*float(d['current']);loadv.set(f"{abs(p):.1f} W  ({float(d['current']):+.2f} A)")
     else:loadv.set("--")
     rm=d.get('estimated_runtime_minutes');runtimev.set("--" if rm is None else f"{int(rm)//60}h {int(rm)%60:02d}m")
     age=float(d.get('_age_seconds',999999));agev.set("NO DATA" if age>9999 else f"{age:.1f} sec")
-    ninav.set(f"Active • last request {max(0,time.time()-last_request_time):.1f}s ago" if last_request_time else "Waiting for N.I.N.A.")
+    if last_request_time: ninav.set(f"Active • last request {max(0,time.time()-last_request_time):.1f}s ago")
+    else:ninav.set("Waiting for N.I.N.A.")
     root.after(1000,tick)
 tick()
 def close():stop.set();httpd.shutdown();root.destroy()
