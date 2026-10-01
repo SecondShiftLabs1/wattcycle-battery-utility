@@ -222,8 +222,14 @@ class WattCycleMonitor:
             self.root.after(100, poll_scan)
 
         def do_scan():
-            status.set("ISOLATED SCANNER ACTIVE — starting child process...")
+            # Ignore duplicate clicks while a scan is already active. The button
+            # is disabled immediately as the first operation, then re-enabled
+            # only by finish_scan().
+            active_proc = scan_state.get("proc")
+            if active_proc is not None and active_proc.is_alive():
+                return
             scan_btn.config(state="disabled")
+            status.set("ISOLATED SCANNER ACTIVE — starting child process...")
             listbox.delete(0, "end")
             found.clear()
             q = multiprocessing.Queue()
