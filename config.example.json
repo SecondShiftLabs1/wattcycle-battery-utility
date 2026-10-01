@@ -1,0 +1,18 @@
+{
+  "battery_address": "",
+  "battery_name": "",
+  "frame_head": 30,
+  "refresh_seconds": 5,
+  "log_interval_seconds": 5,
+  "data_directory": "~/Documents/WattCycle",
+  "session_start_amps": 0.5,
+  "session_start_seconds": 120,
+  "session_end_seconds": 300,
+  "critical_soc": 10,
+  "emergency_soc": 5,
+  "critical_runtime_minutes": 45,
+  "stale_seconds": 30,
+  "allow_mos_control": false,
+  "enable_ascom_alpaca": true,
+  "alpaca_port": 11111
+}
