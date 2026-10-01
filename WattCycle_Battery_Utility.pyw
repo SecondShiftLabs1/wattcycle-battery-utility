@@ -1,5 +1,7 @@
 import asyncio
 import threading
+import multiprocessing
+import queue
 import tkinter as tk
 import sqlite3
 import os
@@ -11,7 +13,32 @@ from datetime import datetime
 from tkinter import ttk, messagebox, simpledialog
 from datetime import timedelta
 from wattcycle_ble import WattcycleClient
-from wattcycle_config import load_config, save_config, scan_devices
+from wattcycle_config import load_config, save_config
+
+def ble_scan_process(result_queue, timeout=10.0):
+    """Run direct Bleak discovery in a killable child process."""
+    try:
+        from bleak import BleakScanner
+
+        async def run():
+            devices = await BleakScanner.discover(timeout=timeout)
+            rows = []
+            seen = set()
+            for d in devices:
+                address = getattr(d, "address", None) or ""
+                if not address or address in seen:
+                    continue
+                seen.add(address)
+                rows.append({"name": getattr(d, "name", None) or "", "address": address})
+            return rows
+
+        result_queue.put(("results", asyncio.run(run())))
+    except BaseException as e:
+        try:
+            result_queue.put(("error", f"{type(e).__name__}: {e}"))
+        except Exception:
+            pass
+
 
 CONFIG = load_config()
 ADDRESS = CONFIG.get("battery_address", "")
@@ -138,67 +165,117 @@ class WattCycleMonitor:
 
         win = tk.Toplevel(self.root)
         win.title("WattCycle Battery Utility - First Run")
-        win.geometry("610x420")
+        win.geometry("660x470")
         win.transient(self.root)
         win.grab_set()
         result = {"ok": False}
+        found = []
+        scan_state = {"proc": None, "queue": None, "deadline": 0.0}
 
         ttk.Label(win, text="Find your WattCycle battery", font=("Segoe UI", 16, "bold")).pack(anchor="w", padx=18, pady=(18,4))
-        ttk.Label(win, text="No battery address is configured. Scan for nearby WattCycle/XDZN BLE devices, then select the battery to monitor.", wraplength=565).pack(anchor="w", padx=18, pady=(0,12))
-        status = tk.StringVar(value="Ready to scan.")
-        listbox = tk.Listbox(win, height=10)
+        ttk.Label(win, text="Scan nearby Bluetooth LE devices, select the WattCycle battery, then click Use Selected. The scan runs in an isolated process so it can be stopped if Windows Bluetooth stalls.", wraplength=615).pack(anchor="w", padx=18, pady=(0,12))
+        status = tk.StringVar(value="Ready to scan. Scanner build: isolated-process v2")
+        listbox = tk.Listbox(win, height=11)
         listbox.pack(fill="both", expand=True, padx=18, pady=6)
-        found=[]
-        ttk.Label(win, textvariable=status).pack(anchor="w", padx=18, pady=4)
+        ttk.Label(win, textvariable=status, wraplength=615).pack(anchor="w", padx=18, pady=4)
+
+        def finish_scan(message):
+            proc = scan_state.get("proc")
+            if proc is not None and proc.is_alive():
+                proc.terminate()
+                proc.join(timeout=1.0)
+            scan_state["proc"] = None
+            scan_state["queue"] = None
+            status.set(message)
+            scan_btn.config(state="normal")
+
+        def poll_scan():
+            proc = scan_state.get("proc")
+            q = scan_state.get("queue")
+            if proc is None or q is None:
+                return
+            try:
+                kind, payload = q.get_nowait()
+                if kind == "results":
+                    found.clear()
+                    found.extend(payload)
+                    listbox.delete(0, "end")
+                    for d in found:
+                        listbox.insert("end", f"{d.get('name') or 'Unknown BLE device'}    {d.get('address','')}")
+                    finish_scan(f"Found {len(found)} BLE device(s). Select the WattCycle battery." if found else "Scan completed but found no BLE devices. Retry or use a known address.")
+                    return
+                if kind == "error":
+                    finish_scan(f"BLE scan failed: {payload}")
+                    return
+            except queue.Empty:
+                pass
+            except Exception as e:
+                finish_scan(f"BLE scan result error: {type(e).__name__}: {e}")
+                return
+
+            if time.monotonic() >= scan_state["deadline"]:
+                finish_scan("BLE scan exceeded 15 seconds and was forcibly stopped. Retry or use a known address.")
+                return
+            if not proc.is_alive():
+                finish_scan(f"BLE scanner exited without results (exit code {proc.exitcode}).")
+                return
+            self.root.after(100, poll_scan)
 
         def do_scan():
-            status.set("Scanning Bluetooth LE...")
+            status.set("ISOLATED SCANNER ACTIVE — starting child process...")
             scan_btn.config(state="disabled")
-            listbox.delete(0,"end"); found.clear()
-
-            def progress(message):
-                self.root.after(0, lambda m=message: status.set(m))
-
-            def worker():
-                try:
-                    devices, diagnostics=asyncio.run(scan_devices(10.0, progress=progress))
-                    def show():
-                        found.extend(devices)
-                        for d in devices:
-                            listbox.insert("end", f"{d.get('name') or 'Unknown BLE device'}    {d.get('address','')}")
-                        if devices:
-                            status.set(f"Found {len(devices)} BLE device(s). Select the WattCycle battery, then click Use Selected.")
-                        else:
-                            detail=" | ".join(diagnostics) if diagnostics else "No scan diagnostics were returned."
-                            status.set(f"No BLE devices found. {detail}")
-                        scan_btn.config(state="normal")
-                    self.root.after(0,show)
-                except Exception as e:
-                    msg=f"Scan failed: {type(e).__name__}: {e}"
-                    self.root.after(0,lambda m=msg: (status.set(m),scan_btn.config(state="normal")))
-            threading.Thread(target=worker,daemon=True).start()
+            listbox.delete(0, "end")
+            found.clear()
+            q = multiprocessing.Queue()
+            proc = multiprocessing.Process(target=ble_scan_process, args=(q, 10.0), daemon=True)
+            scan_state["queue"] = q
+            scan_state["proc"] = proc
+            scan_state["deadline"] = time.monotonic() + 15.0
+            try:
+                proc.start()
+                status.set("ISOLATED SCANNER ACTIVE — scanning BLE for 10 seconds...")
+                self.root.after(100, poll_scan)
+            except Exception as e:
+                finish_scan(f"Could not start BLE scanner: {type(e).__name__}: {e}")
 
         def use_selected():
-            sel=listbox.curselection()
-            if not sel: return messagebox.showinfo("Select battery","Select a discovered battery first.",parent=win)
-            d=found[sel[0]]
-            CONFIG["battery_address"]=d["address"]
-            CONFIG["battery_name"]=d.get("name","")
+            global ADDRESS, CONFIG
+            sel = listbox.curselection()
+            if not sel:
+                return messagebox.showinfo("Select battery", "Select a discovered battery first.", parent=win)
+            d = found[sel[0]]
+            CONFIG["battery_address"] = d["address"]
+            CONFIG["battery_name"] = d.get("name", "")
             save_config(CONFIG)
-            ADDRESS=d["address"]
-            result["ok"]=True
+            ADDRESS = d["address"]
+            result["ok"] = True
             win.destroy()
 
         def manual():
-            a=simpledialog.askstring("Battery address","Enter the BLE address for the battery:",parent=win)
+            global ADDRESS, CONFIG
+            a = simpledialog.askstring("Battery address", "Enter the BLE address for the battery:", parent=win)
             if a:
-                CONFIG["battery_address"]=a.strip(); save_config(CONFIG); ADDRESS=a.strip(); result["ok"]=True; win.destroy()
+                CONFIG["battery_address"] = a.strip()
+                save_config(CONFIG)
+                ADDRESS = a.strip()
+                result["ok"] = True
+                win.destroy()
 
-        buttons=ttk.Frame(win); buttons.pack(fill="x",padx=18,pady=(6,18))
-        scan_btn=ttk.Button(buttons,text="Scan",command=do_scan); scan_btn.pack(side="left")
-        ttk.Button(buttons,text="Use Selected",command=use_selected).pack(side="left",padx=6)
-        ttk.Button(buttons,text="Enter Address Manually",command=manual).pack(side="left",padx=6)
-        ttk.Button(buttons,text="Cancel",command=win.destroy).pack(side="right")
+        def close_setup():
+            proc = scan_state.get("proc")
+            if proc is not None and proc.is_alive():
+                proc.terminate()
+                proc.join(timeout=1.0)
+            win.destroy()
+
+        buttons = ttk.Frame(win)
+        buttons.pack(fill="x", padx=18, pady=(6,18))
+        scan_btn = ttk.Button(buttons, text="Scan", command=do_scan)
+        scan_btn.pack(side="left")
+        ttk.Button(buttons, text="Use Selected", command=use_selected).pack(side="left", padx=6)
+        ttk.Button(buttons, text="Use Known Address", command=manual).pack(side="left", padx=6)
+        ttk.Button(buttons, text="Cancel", command=close_setup).pack(side="right")
+        win.protocol("WM_DELETE_WINDOW", close_setup)
         self.root.wait_window(win)
         return result["ok"]
 
