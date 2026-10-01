@@ -152,21 +152,30 @@ class WattCycleMonitor:
         ttk.Label(win, textvariable=status).pack(anchor="w", padx=18, pady=4)
 
         def do_scan():
-            status.set("Scanning Bluetooth LE for 10 seconds...")
+            status.set("Scanning Bluetooth LE...")
             scan_btn.config(state="disabled")
             listbox.delete(0,"end"); found.clear()
+
+            def progress(message):
+                self.root.after(0, lambda m=message: status.set(m))
+
             def worker():
                 try:
-                    devices=asyncio.run(scan_devices(10.0))
+                    devices, diagnostics=asyncio.run(scan_devices(10.0, progress=progress))
                     def show():
                         found.extend(devices)
                         for d in devices:
                             listbox.insert("end", f"{d.get('name') or 'Unknown BLE device'}    {d.get('address','')}")
-                        status.set(f"Found {len(devices)} compatible-looking device(s)." if devices else "No compatible-looking devices found. You can scan again or enter an address manually.")
+                        if devices:
+                            status.set(f"Found {len(devices)} BLE device(s). Select the WattCycle battery, then click Use Selected.")
+                        else:
+                            detail=" | ".join(diagnostics) if diagnostics else "No scan diagnostics were returned."
+                            status.set(f"No BLE devices found. {detail}")
                         scan_btn.config(state="normal")
                     self.root.after(0,show)
                 except Exception as e:
-                    self.root.after(0,lambda: (status.set(f"Scan failed: {e}"),scan_btn.config(state="normal")))
+                    msg=f"Scan failed: {type(e).__name__}: {e}"
+                    self.root.after(0,lambda m=msg: (status.set(m),scan_btn.config(state="normal")))
             threading.Thread(target=worker,daemon=True).start()
 
         def use_selected():
