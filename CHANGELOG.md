@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Fixed first-run BLE discovery getting stuck when the upstream scan fails to return.
+- Added an outer scan timeout, direct Bleak/Windows fallback, progress messages, and diagnostic errors.
+
 ## 0.1.0-alpha - 2026-10-01
 
 - First repository-style public alpha derived from the working personal prototype.
