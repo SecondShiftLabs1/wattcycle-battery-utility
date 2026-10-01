@@ -1,0 +1,2 @@
+wattcycle_ble @ git+https://github.com/qume/wattcycle_ble.git
+bleak
