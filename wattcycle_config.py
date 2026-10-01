@@ -44,5 +44,7 @@ async def scan_devices(timeout=10.0):
     for d in devices:
         name=getattr(d,"name",None) or ""
         address=getattr(d,"address",None) or ""
+        # Upstream scan is already intended for WattCycle/XDZN devices; retain
+        # all returned candidates and show identifying info to the user.
         out.append({"name":name,"address":address})
     return out
