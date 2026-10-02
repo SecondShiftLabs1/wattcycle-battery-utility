@@ -1075,6 +1075,9 @@ class WattCycleMonitor:
         ).pack(anchor="w")
 
         def save():
+            global CONFIG, REFRESH_SECONDS, LOG_INTERVAL, SESSION_START_AMPS
+            global SESSION_START_SECONDS, SESSION_END_SECONDS, NINA_CRITICAL_SOC
+            global NINA_EMERGENCY_SOC, NINA_CRITICAL_RUNTIME_MIN, MOS_CONTROL_ENABLED
             try:
                 values = {
                     "refresh_seconds": max(1, int(fields["refresh_seconds"].get())),
