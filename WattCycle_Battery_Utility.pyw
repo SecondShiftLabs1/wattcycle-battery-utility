@@ -21,16 +21,20 @@ def ble_scan_process(result_queue, timeout=10.0):
         from bleak import BleakScanner
 
         async def run():
-            devices = await BleakScanner.discover(timeout=timeout)
-            rows = []
-            seen = set()
-            for d in devices:
-                address = getattr(d, "address", None) or ""
-                if not address or address in seen:
-                    continue
-                seen.add(address)
-                rows.append({"name": getattr(d, "name", None) or "", "address": address})
-            return rows
+            rows = {}
+            def detected(device, advertisement_data):
+                address = getattr(device, "address", None) or ""
+                if not address:
+                    return
+                name = getattr(advertisement_data, "local_name", None) or getattr(device, "name", None) or ""
+                rows[address] = {"name": name, "address": address}
+            scanner = BleakScanner(detection_callback=detected)
+            await scanner.start()
+            try:
+                await asyncio.sleep(timeout)
+            finally:
+                await scanner.stop()
+            return list(rows.values())
 
         result_queue.put(("results", asyncio.run(run())))
     except BaseException as e:
@@ -174,7 +178,7 @@ class WattCycleMonitor:
 
         ttk.Label(win, text="Find your WattCycle battery", font=("Segoe UI", 16, "bold")).pack(anchor="w", padx=18, pady=(18,4))
         ttk.Label(win, text="Scan nearby Bluetooth LE devices, select the WattCycle battery, then click Use Selected. The scan runs in an isolated process so it can be stopped if Windows Bluetooth stalls.", wraplength=615).pack(anchor="w", padx=18, pady=(0,12))
-        status = tk.StringVar(value="Ready to scan. Scanner build: isolated-process v2")
+        status = tk.StringVar(value="Ready to scan. Scanner build: advertisement-callback v3")
         listbox = tk.Listbox(win, height=11)
         listbox.pack(fill="both", expand=True, padx=18, pady=6)
         ttk.Label(win, textvariable=status, wraplength=615).pack(anchor="w", padx=18, pady=4)
@@ -239,7 +243,7 @@ class WattCycleMonitor:
             scan_state["deadline"] = time.monotonic() + 15.0
             try:
                 proc.start()
-                status.set("ISOLATED SCANNER ACTIVE — scanning BLE for 10 seconds...")
+                status.set("ADVERTISEMENT SCAN — listening for nearby BLE devices for 10 seconds...")
                 self.root.after(100, poll_scan)
             except Exception as e:
                 finish_scan(f"Could not start BLE scanner: {type(e).__name__}: {e}")
