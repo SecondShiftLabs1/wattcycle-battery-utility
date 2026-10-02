@@ -728,6 +728,7 @@ class WattCycleMonitor:
             font=("Segoe UI", 10)
         )
         self.connection_label.pack()
+        ttk.Button(main, text="Settings", command=self.show_settings).pack(pady=(6, 0))
 
         self.soc_label = ttk.Label(
             main,
@@ -1024,6 +1025,110 @@ class WattCycleMonitor:
             font=("Segoe UI", 8)
         )
         self.footer.pack(pady=(8, 0))
+
+    def show_settings(self):
+        global CONFIG, REFRESH_SECONDS, LOG_INTERVAL, SESSION_START_AMPS
+        global SESSION_START_SECONDS, SESSION_END_SECONDS, NINA_CRITICAL_SOC
+        global NINA_EMERGENCY_SOC, NINA_CRITICAL_RUNTIME_MIN, MOS_CONTROL_ENABLED
+
+        win = tk.Toplevel(self.root)
+        win.title("WattCycle Battery Utility - Settings")
+        win.geometry("560x610")
+        win.transient(self.root)
+
+        outer = ttk.Frame(win, padding=16)
+        outer.pack(fill="both", expand=True)
+        ttk.Label(outer, text="SETTINGS", font=("Segoe UI", 16, "bold")).pack(anchor="w")
+        ttk.Label(
+            outer,
+            text="Changes apply immediately where possible. Bluetooth address and data-folder changes require an application restart.",
+            wraplength=515
+        ).pack(anchor="w", pady=(0, 12))
+
+        fields = {}
+        specs = [
+            ("refresh_seconds", "Telemetry refresh (seconds)", REFRESH_SECONDS),
+            ("log_interval_seconds", "Log interval (seconds)", LOG_INTERVAL),
+            ("log_retention_days", "Raw telemetry retention (days)", CONFIG.get("log_retention_days", 90)),
+            ("session_start_amps", "Session start load (amps)", SESSION_START_AMPS),
+            ("session_start_seconds", "Session qualification (seconds)", SESSION_START_SECONDS),
+            ("session_end_seconds", "Session end idle time (seconds)", SESSION_END_SECONDS),
+            ("critical_soc", "Critical SOC (%)", NINA_CRITICAL_SOC),
+            ("emergency_soc", "Emergency SOC (%)", NINA_EMERGENCY_SOC),
+            ("critical_runtime_minutes", "Critical runtime reserve (minutes)", NINA_CRITICAL_RUNTIME_MIN),
+        ]
+        form = ttk.Frame(outer)
+        form.pack(fill="x")
+        for row, (key, label, value) in enumerate(specs):
+            ttk.Label(form, text=label).grid(row=row, column=0, sticky="w", pady=4)
+            var = tk.StringVar(value=str(value))
+            ttk.Entry(form, textvariable=var, width=16).grid(row=row, column=1, sticky="e", padx=(12, 0), pady=4)
+            fields[key] = var
+        form.columnconfigure(0, weight=1)
+
+        mos_var = tk.BooleanVar(value=MOS_CONTROL_ENABLED)
+        ttk.Checkbutton(outer, text="Enable Charge/Discharge MOS controls", variable=mos_var).pack(anchor="w", pady=(14, 2))
+        ttk.Label(
+            outer,
+            text="MOS control can disable charging or battery output. Keep this off unless you intentionally need BMS switching.",
+            wraplength=515
+        ).pack(anchor="w")
+
+        def save():
+            try:
+                values = {
+                    "refresh_seconds": max(1, int(fields["refresh_seconds"].get())),
+                    "log_interval_seconds": max(1, int(fields["log_interval_seconds"].get())),
+                    "log_retention_days": max(1, int(fields["log_retention_days"].get())),
+                    "session_start_amps": max(0.05, float(fields["session_start_amps"].get())),
+                    "session_start_seconds": max(1, int(fields["session_start_seconds"].get())),
+                    "session_end_seconds": max(1, int(fields["session_end_seconds"].get())),
+                    "critical_soc": int(fields["critical_soc"].get()),
+                    "emergency_soc": int(fields["emergency_soc"].get()),
+                    "critical_runtime_minutes": max(1, int(fields["critical_runtime_minutes"].get())),
+                }
+                if not (0 <= values["emergency_soc"] < values["critical_soc"] <= 100):
+                    raise ValueError("Emergency SOC must be lower than Critical SOC, and both must be 0-100.")
+            except ValueError as e:
+                messagebox.showerror("Invalid Settings", str(e), parent=win)
+                return
+
+            if mos_var.get() and not MOS_CONTROL_ENABLED:
+                if not messagebox.askyesno(
+                    "Enable BMS Control?",
+                    "This enables commands that can disable charging or remove battery output power.\n\nEnable MOS control?",
+                    parent=win
+                ):
+                    mos_var.set(False)
+
+            CONFIG.update(values)
+            CONFIG["allow_mos_control"] = bool(mos_var.get())
+            save_config(CONFIG)
+
+            REFRESH_SECONDS = values["refresh_seconds"]
+            LOG_INTERVAL = values["log_interval_seconds"]
+            SESSION_START_AMPS = values["session_start_amps"]
+            SESSION_START_SECONDS = values["session_start_seconds"]
+            SESSION_END_SECONDS = values["session_end_seconds"]
+            NINA_CRITICAL_SOC = values["critical_soc"]
+            NINA_EMERGENCY_SOC = values["emergency_soc"]
+            NINA_CRITICAL_RUNTIME_MIN = values["critical_runtime_minutes"]
+            MOS_CONTROL_ENABLED = bool(mos_var.get())
+
+            self.charge_button.config(state="normal" if MOS_CONTROL_ENABLED else "disabled")
+            self.discharge_button.config(state="normal" if MOS_CONTROL_ENABLED else "disabled")
+            self.control_status.config(text=(
+                "MOS control enabled. Controls reflect actual BMS state."
+                if MOS_CONTROL_ENABLED else "MOS control disabled (safe default)."
+            ))
+            self.nina_critical_value.config(text=f"{NINA_CRITICAL_SOC}% / {NINA_CRITICAL_RUNTIME_MIN}m")
+            self.nina_emergency_value.config(text=f"{NINA_EMERGENCY_SOC}%")
+            win.destroy()
+
+        buttons = ttk.Frame(outer)
+        buttons.pack(fill="x", pady=(18, 0))
+        ttk.Button(buttons, text="Save Settings", command=save).pack(side="left")
+        ttk.Button(buttons, text="Cancel", command=win.destroy).pack(side="right")
 
     def show_session_history(self):
         win = tk.Toplevel(self.root)
