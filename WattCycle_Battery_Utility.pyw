@@ -279,9 +279,18 @@ class WattCycleMonitor:
 
         def close_setup():
             proc = scan_state.get("proc")
-            if proc is not None and proc.is_alive():
-                proc.terminate()
-                proc.join(timeout=1.0)
+            if proc is not None and proc.poll() is None:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=1.0)
+                except Exception:
+                    pass
+            output_path = scan_state.get("output_path")
+            if output_path:
+                try:
+                    os.remove(output_path)
+                except OSError:
+                    pass
             win.destroy()
 
         buttons = ttk.Frame(win)
@@ -328,11 +337,17 @@ class WattCycleMonitor:
             """)
 
     def add_sample(self, d):
-        self.samples.append((time.time(), d.current, d.module_voltage))
+        now = time.time()
+        # Do not blend pre-disconnect load history into a new connection.
+        if self.samples and now - self.samples[-1][0] > max(30, REFRESH_SECONDS * 4):
+            self.samples.clear()
+        self.samples.append((now, d.current, d.module_voltage))
 
-    def rolling_average(self, seconds):
+    def rolling_average(self, seconds, discharge_only=False):
         cutoff = time.time() - seconds
         values = [(c, v) for t, c, v in self.samples if t >= cutoff]
+        if discharge_only:
+            values = [(c, v) for c, v in values if c < -0.10]
         if not values:
             return None, None
         return (
@@ -558,9 +573,9 @@ class WattCycleMonitor:
         if self.nina_simulated_state and now >= self.nina_simulated_until:
             self.nina_simulated_state = None
 
-        avg15_current, _ = self.rolling_average(900)
+        avg15_current, _ = self.rolling_average(900, discharge_only=True)
         runtime_min = None
-        if avg15_current is not None and avg15_current < -0.10:
+        if avg15_current is not None:
             runtime_min = (d.remaining_capacity / abs(avg15_current)) * 60.0
         self.nina_runtime_minutes = runtime_min
 
@@ -1491,19 +1506,20 @@ class WattCycleMonitor:
 
             avg5_current, avg5_power = self.rolling_average(300)
             avg15_current, avg15_power = self.rolling_average(900)
+            runtime_current, _ = self.rolling_average(900, discharge_only=True)
 
             if avg5_current is not None:
-                self.avg5_value.config(
-                    text=f"{abs(avg5_current):.2f} A / {abs(avg5_power):.0f} W"
-                )
+                self.avg5_value.config(text=f"{abs(avg5_current):.2f} A / {abs(avg5_power):.0f} W")
+            else:
+                self.avg5_value.config(text="--")
 
             if avg15_current is not None:
-                self.avg15_value.config(
-                    text=f"{abs(avg15_current):.2f} A / {abs(avg15_power):.0f} W"
-                )
+                self.avg15_value.config(text=f"{abs(avg15_current):.2f} A / {abs(avg15_power):.0f} W")
+            else:
+                self.avg15_value.config(text="--")
 
-            if avg15_current is not None and avg15_current < -0.10:
-                hours = d.remaining_capacity / abs(avg15_current)
+            if runtime_current is not None and current < -0.10:
+                hours = d.remaining_capacity / abs(runtime_current)
                 total_minutes = int(hours * 60)
                 h, m = divmod(total_minutes, 60)
                 self.avg_runtime_value.config(text=f"{h}h {m:02d}m")
