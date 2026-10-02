@@ -99,6 +99,7 @@ class WattCycleMonitor:
         self.session_last_current = None
         self.session_last_voltage = None
         self.last_session_summary = None
+        self.last_session_end_soc = None
 
         # Alert state. Threshold alerts fire once per discharge crossing and
         # automatically re-arm after SOC rises above the threshold again.
@@ -405,9 +406,6 @@ class WattCycleMonitor:
         watts = discharge_amps * d.module_voltage
         under_load = discharge_amps >= SESSION_START_AMPS
 
-        # During the two-minute qualification period, accumulate the energy too.
-        # If the load qualifies, those first two minutes become part of the session
-        # instead of being shown in duration but missing from Ah/Wh totals.
         if not self.session_active:
             if under_load:
                 if self.session_candidate_since is None:
@@ -419,7 +417,12 @@ class WattCycleMonitor:
                     self.candidate_last_current = discharge_amps
                     self.candidate_last_voltage = d.module_voltage
                 else:
-                    dt = max(0.0, min(now - self.candidate_last_time, 30.0))
+                    # A telemetry gap should not count toward qualification or energy.
+                    gap = now - self.candidate_last_time
+                    if gap > max(30, REFRESH_SECONDS * 4):
+                        self.reset_session_candidate()
+                        return
+                    dt = max(0.0, gap)
                     avg_amps = (self.candidate_last_current + discharge_amps) / 2.0
                     avg_voltage = (self.candidate_last_voltage + d.module_voltage) / 2.0
                     self.candidate_ah += avg_amps * dt / 3600.0
@@ -447,15 +450,20 @@ class WattCycleMonitor:
                 self.reset_session_candidate()
             return
 
-        # Integrate actual discharge between samples. Charging/idle contributes zero.
+        # A long disconnect does not get integrated as if the load continued.
         if self.session_last_sample_time is not None:
-            dt = max(0.0, min(now - self.session_last_sample_time, 30.0))
-            previous_amps = max(0.0, self.session_last_current or 0.0)
-            avg_amps = (previous_amps + discharge_amps) / 2.0
-            previous_voltage = self.session_last_voltage or d.module_voltage
-            avg_voltage = (previous_voltage + d.module_voltage) / 2.0
-            self.session_ah += avg_amps * dt / 3600.0
-            self.session_wh += avg_amps * avg_voltage * dt / 3600.0
+            gap = now - self.session_last_sample_time
+            if gap <= max(30, REFRESH_SECONDS * 4):
+                previous_amps = max(0.0, self.session_last_current or 0.0)
+                avg_amps = (previous_amps + discharge_amps) / 2.0
+                previous_voltage = self.session_last_voltage or d.module_voltage
+                avg_voltage = (previous_voltage + d.module_voltage) / 2.0
+                self.session_ah += avg_amps * gap / 3600.0
+                self.session_wh += avg_amps * avg_voltage * gap / 3600.0
+            else:
+                # Restart idle qualification after a telemetry outage. We cannot
+                # know whether the battery was loaded during the missing interval.
+                self.session_idle_since = None
 
         self.session_last_sample_time = now
         self.session_last_current = discharge_amps
@@ -469,6 +477,7 @@ class WattCycleMonitor:
             if self.session_idle_since is None:
                 self.session_idle_since = now
             elif now - self.session_idle_since >= SESSION_END_SECONDS:
+                # End at the first low-load sample, not five minutes later.
                 self.finish_session(d, self.session_idle_since)
 
     def finish_session(self, d, end_time=None):
@@ -479,21 +488,30 @@ class WattCycleMonitor:
         avg_watts = self.session_wh / (duration / 3600.0) if duration > 0 else 0.0
         start_text = datetime.fromtimestamp(self.session_start_time).isoformat(timespec="seconds")
         end_text = datetime.fromtimestamp(end_time).isoformat(timespec="seconds")
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute("""
-                INSERT INTO sessions (
-                    start_time, end_time, start_soc, end_soc, amp_hours,
-                    watt_hours, avg_watts, peak_amps, peak_watts, duration_seconds
-                ) VALUES (?,?,?,?,?,?,?,?,?,?)
-            """, (
-                start_text, end_text, self.session_start_soc, d.soc,
-                self.session_ah, self.session_wh, avg_watts,
-                self.session_peak_amps, self.session_peak_watts, duration
-            ))
-        self.last_session_summary = (
-            f"Last: {self.session_wh:.1f} Wh / {self.session_ah:.2f} Ah"
-        )
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                conn.execute("""
+                    INSERT INTO sessions (
+                        start_time, end_time, start_soc, end_soc, amp_hours,
+                        watt_hours, avg_watts, peak_amps, peak_watts, duration_seconds
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                """, (
+                    start_text, end_text, self.session_start_soc, d.soc,
+                    self.session_ah, self.session_wh, avg_watts,
+                    self.session_peak_amps, self.session_peak_watts, duration
+                ))
+        except Exception as e:
+            self.error = f"Could not save completed session: {e}"
+            return
+
+        self.last_session_summary = f"Last: {self.session_wh:.1f} Wh / {self.session_ah:.2f} Ah"
+        self.last_session_end_soc = d.soc
         self.session_active = False
+        self.session_ah = 0.0
+        self.session_wh = 0.0
+        self.session_peak_amps = 0.0
+        self.session_peak_watts = 0.0
+        self.session_start_soc = None
         self.reset_session_candidate()
         self.session_idle_since = None
         self.session_start_time = None
