@@ -1,0 +1,36 @@
+name: Python smoke check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  compile:
+    name: Compile Python sources
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Compile all Python source files
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem -Recurse -File | Where-Object { $_.Extension -in ".py", ".pyw" }
+          if (-not $files) { throw "No Python source files found." }
+          foreach ($file in $files) {
+            Write-Host "Compiling $($file.FullName)"
+            python -m py_compile $file.FullName
+          }
