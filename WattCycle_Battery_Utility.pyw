@@ -73,6 +73,8 @@ class WattCycleMonitor:
         os.makedirs(DATA_DIR, exist_ok=True)
         self.samples = deque(maxlen=720)
         self.last_log_time = 0
+        self.last_data_time = None
+        self.connected = False
 
         # Automatic discharge-session tracking. A session begins after sustained
         # discharge and ends after the load has remained low for five minutes.
@@ -652,7 +654,7 @@ class WattCycleMonitor:
 
         ttk.Label(
             main,
-            text="100Ah LiFePO4 Battery Monitor",
+            text="Bluetooth LiFePO4 Battery Monitor",
             font=("Segoe UI", 11)
         ).pack(pady=(0, 10))
 
@@ -726,7 +728,7 @@ class WattCycleMonitor:
         # Automatic session summary
         session = ttk.LabelFrame(
             main,
-            text=" Astro Session ",
+            text=" Discharge Session ",
             padding=10
         )
         session.pack(fill="x", pady=6)
@@ -1245,6 +1247,7 @@ class WattCycleMonitor:
                 self.error = None
 
                 await client.connect()
+                self.connected = True
                 client.frame_head = FRAME_HEAD
                 if self.disconnect_started is not None:
                     outage = time.time() - self.disconnect_started
@@ -1366,6 +1369,7 @@ class WattCycleMonitor:
 
                     if data is not None:
                         self.data = data
+                        self.last_data_time = time.time()
                         self.error = None
                         self.add_sample(data)
                         self.log_sample(data, warning)
@@ -1391,12 +1395,14 @@ class WattCycleMonitor:
                     )
 
             except Exception as e:
+                self.connected = False
                 self.error = str(e)
                 self.control_busy = False
                 if self.disconnect_started is None:
                     self.disconnect_started = time.time()
 
             finally:
+                self.connected = False
                 try:
                     await client.disconnect()
                 except Exception:
@@ -1416,9 +1422,13 @@ class WattCycleMonitor:
             d = self.data
             w = self.warning
 
-            self.connection_label.config(
-                text="● Connected"
-            )
+            data_age = (time.time() - self.last_data_time) if self.last_data_time is not None else None
+            if self.connected and data_age is not None and data_age <= max(15, REFRESH_SECONDS * 3):
+                self.connection_label.config(text="● Connected — live telemetry")
+            elif self.error:
+                self.connection_label.config(text=f"● Reconnecting — {self.error}")
+            else:
+                self.connection_label.config(text="● Reconnecting — waiting for fresh telemetry")
 
             self.soc_label.config(
                 text=f"{d.soc}%"
@@ -1500,7 +1510,7 @@ class WattCycleMonitor:
             else:
                 self.avg_runtime_value.config(text="--")
 
-            # Automatic astro-session summary
+            # Automatic discharge-session summary
             if self.session_active and self.session_start_time is not None:
                 elapsed = max(0, int(time.time() - self.session_start_time))
                 hh, rem = divmod(elapsed, 3600)
