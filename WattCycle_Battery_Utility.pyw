@@ -2,6 +2,7 @@ import asyncio
 import threading
 import tkinter as tk
 import sqlite3
+import csv
 import os
 import time
 import subprocess
@@ -73,6 +74,8 @@ class WattCycleMonitor:
         os.makedirs(DATA_DIR, exist_ok=True)
         self.samples = deque(maxlen=720)
         self.last_log_time = 0
+        self.last_log_error = None
+        self.last_db_maintenance = 0
         self.last_data_time = None
         self.connected = False
 
@@ -306,36 +309,58 @@ class WattCycleMonitor:
         return result["ok"]
 
     def init_database(self):
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS battery_log (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT NOT NULL,
-                    soc INTEGER, remaining_ah REAL, voltage REAL,
-                    current REAL, power REAL,
-                    cell1 REAL, cell2 REAL, cell3 REAL, cell4 REAL,
-                    cell_delta_mv REAL, mos_temp REAL, pcb_temp REAL,
-                    battery_temp REAL, charge_mos INTEGER,
-                    discharge_mos INTEGER, battery_mode INTEGER,
-                    warning1 INTEGER, warning2 INTEGER
-                )
-            """)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_battery_timestamp ON battery_log(timestamp)")
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS sessions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    start_time TEXT NOT NULL,
-                    end_time TEXT NOT NULL,
-                    start_soc INTEGER,
-                    end_soc INTEGER,
-                    amp_hours REAL,
-                    watt_hours REAL,
-                    avg_watts REAL,
-                    peak_amps REAL,
-                    peak_watts REAL,
-                    duration_seconds REAL
-                )
-            """)
+        try:
+            with sqlite3.connect(DB_PATH, timeout=5) as conn:
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA busy_timeout=5000")
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS battery_log (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp TEXT NOT NULL,
+                        soc INTEGER, remaining_ah REAL, voltage REAL,
+                        current REAL, power REAL,
+                        cell1 REAL, cell2 REAL, cell3 REAL, cell4 REAL,
+                        cell_delta_mv REAL, mos_temp REAL, pcb_temp REAL,
+                        battery_temp REAL, charge_mos INTEGER,
+                        discharge_mos INTEGER, battery_mode INTEGER,
+                        warning1 INTEGER, warning2 INTEGER
+                    )
+                """)
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_battery_timestamp ON battery_log(timestamp)")
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS sessions (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        start_time TEXT NOT NULL,
+                        end_time TEXT NOT NULL,
+                        start_soc INTEGER,
+                        end_soc INTEGER,
+                        amp_hours REAL,
+                        watt_hours REAL,
+                        avg_watts REAL,
+                        peak_amps REAL,
+                        peak_watts REAL,
+                        duration_seconds REAL
+                    )
+                """)
+        except Exception as e:
+            self.last_log_error = f"Database initialization failed: {e}"
+
+    def maintain_database(self):
+        # Keep raw telemetry useful without allowing a 5-second logger to grow
+        # forever. Completed session summaries are intentionally retained.
+        now = time.time()
+        if now - self.last_db_maintenance < 86400:
+            return
+        self.last_db_maintenance = now
+        retention_days = max(1, int(CONFIG.get("log_retention_days", 90)))
+        cutoff = (datetime.now() - timedelta(days=retention_days)).isoformat(timespec="seconds")
+        try:
+            with sqlite3.connect(DB_PATH, timeout=5) as conn:
+                conn.execute("PRAGMA busy_timeout=5000")
+                conn.execute("DELETE FROM battery_log WHERE timestamp < ?", (cutoff,))
+                conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+        except Exception as e:
+            self.last_log_error = f"Database maintenance failed: {e}"
 
     def add_sample(self, d):
         now = time.time()
@@ -360,34 +385,41 @@ class WattCycleMonitor:
         now = time.time()
         if now - self.last_log_time < LOG_INTERVAL:
             return
-        self.last_log_time = now
         cells = list(d.cell_voltages)
         while len(cells) < 4:
             cells.append(None)
-        delta = ((max(d.cell_voltages) - min(d.cell_voltages)) * 1000
-                 if d.cell_voltages else None)
+        delta = ((max(d.cell_voltages) - min(d.cell_voltages)) * 1000 if d.cell_voltages else None)
         battery_temp = d.cell_temperatures[0] if d.cell_temperatures else None
         charge_mos = int(bool(w.status_register_3 & CHARGE_BIT)) if w else None
         discharge_mos = int(bool(w.status_register_3 & DISCHARGE_BIT)) if w else None
         battery_mode = w.battery_mode if w else None
         warning1 = w.warning_register_1 if w else None
         warning2 = w.warning_register_2 if w else None
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute("""
-                INSERT INTO battery_log (
-                    timestamp, soc, remaining_ah, voltage, current, power,
-                    cell1, cell2, cell3, cell4, cell_delta_mv, mos_temp,
-                    pcb_temp, battery_temp, charge_mos, discharge_mos,
-                    battery_mode, warning1, warning2
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-            """, (
-                datetime.now().isoformat(timespec="seconds"), d.soc,
-                d.remaining_capacity, d.module_voltage, d.current,
-                d.module_voltage * d.current, cells[0], cells[1], cells[2],
-                cells[3], delta, d.mos_temperature, d.pcb_temperature,
-                battery_temp, charge_mos, discharge_mos, battery_mode,
-                warning1, warning2
-            ))
+        try:
+            with sqlite3.connect(DB_PATH, timeout=5) as conn:
+                conn.execute("PRAGMA busy_timeout=5000")
+                conn.execute("""
+                    INSERT INTO battery_log (
+                        timestamp, soc, remaining_ah, voltage, current, power,
+                        cell1, cell2, cell3, cell4, cell_delta_mv, mos_temp,
+                        pcb_temp, battery_temp, charge_mos, discharge_mos,
+                        battery_mode, warning1, warning2
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """, (
+                    datetime.now().isoformat(timespec="seconds"), d.soc,
+                    d.remaining_capacity, d.module_voltage, d.current,
+                    d.module_voltage * d.current, cells[0], cells[1], cells[2],
+                    cells[3], delta, d.mos_temperature, d.pcb_temperature,
+                    battery_temp, charge_mos, discharge_mos, battery_mode,
+                    warning1, warning2
+                ))
+            self.last_log_time = now
+            self.last_log_error = None
+            self.maintain_database()
+        except Exception as e:
+            # Logging is secondary to live monitoring. Retry next poll rather
+            # than allowing a locked/unwritable DB to break BLE telemetry.
+            self.last_log_error = f"Telemetry logging failed: {e}"
 
     def reset_session_candidate(self):
         self.session_candidate_since = None
@@ -1709,7 +1741,10 @@ class WattCycleMonitor:
                         f"{self.product.firmware_version} | "
                         f"BLE {ADDRESS}"
                     )
-                )
+
+
+            if self.last_log_error:
+                self.footer.config(text=f"Logging warning: {self.last_log_error}")                )
 
         elif self.error:
 
