@@ -2,7 +2,6 @@ import asyncio
 import threading
 import tkinter as tk
 import sqlite3
-import csv
 import os
 import time
 import subprocess
