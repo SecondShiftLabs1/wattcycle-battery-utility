@@ -1333,8 +1333,10 @@ class WattCycleMonitor:
     # ---------------------------------------------------------
 
     def toggle_charge(self):
-
-        if self.control_busy or self.charge_on is None:
+        if not MOS_CONTROL_ENABLED:
+            self.control_status.config(text="MOS control is disabled in Settings.")
+            return
+        if self.control_busy or self.charge_on is None or not self.connected:
             return
 
         if self.charge_on:
@@ -1366,8 +1368,10 @@ class WattCycleMonitor:
         )
 
     def toggle_discharge(self):
-
-        if self.control_busy or self.discharge_on is None:
+        if not MOS_CONTROL_ENABLED:
+            self.control_status.config(text="MOS control is disabled in Settings.")
+            return
+        if self.control_busy or self.discharge_on is None or not self.connected:
             return
 
         if self.discharge_on:
@@ -1445,7 +1449,9 @@ class WattCycleMonitor:
                                 if cmd_id and cmd_id != self.last_external_command_id:
                                     created = float(ext.get("created", 0) or 0)
                                     if created and time.time() - created <= 60:
-                                        if ext.get("control") == "discharge":
+                                        if not CONFIG.get("enable_ascom_alpaca", False):
+                                            self.control_message = "External MOS command ignored: Alpaca integration is disabled"
+                                        elif ext.get("control") == "discharge":
                                             desired = bool(ext.get("state"))
                                             self.pending_command = (
                                                 "discharge", desired,
@@ -1466,66 +1472,44 @@ class WattCycleMonitor:
                         self.control_message = "MOS control blocked by config.json"
 
                     if self.pending_command is not None:
-
-                        control, desired, command = (
-                            self.pending_command
-                        )
-
+                        control, desired, command = self.pending_command
                         self.pending_command = None
+                        try:
+                            # Refresh state immediately before a write. GUI state may
+                            # be several seconds old by the time the user clicks.
+                            before = await client.read_warning_info()
+                            if before is not None:
+                                self.warning = before
+                                self.charge_on = bool(before.status_register_3 & CHARGE_BIT)
+                                self.discharge_on = bool(before.status_register_3 & DISCHARGE_BIT)
+                                actual_before = self.charge_on if control == "charge" else self.discharge_on
+                                if actual_before == desired:
+                                    self.control_message = f"{control.title()} MOS already {'ON' if desired else 'OFF'} — no command sent"
+                                    continue
 
-                        response = await client.send_command(
-                            command,
-                            timeout=3
-                        )
-
-                        # Give BMS time to update status.
-                        await asyncio.sleep(1)
-
-                        verify = (
-                            await client.read_warning_info()
-                        )
-
-                        if verify is not None:
-
-                            self.warning = verify
-
-                            charge = bool(
-                                verify.status_register_3
-                                & CHARGE_BIT
-                            )
-
-                            discharge = bool(
-                                verify.status_register_3
-                                & DISCHARGE_BIT
-                            )
-
-                            self.charge_on = charge
-                            self.discharge_on = discharge
-
-                            actual = (
-                                charge
-                                if control == "charge"
-                                else discharge
-                            )
-
-                            if actual == desired:
-                                self.control_message = (
-                                    f"{control.title()} MOS "
-                                    f"{'ON' if desired else 'OFF'} "
-                                    f"— verified by BMS"
-                                )
+                            await client.send_command(command, timeout=3)
+                            await asyncio.sleep(1)
+                            verify = await client.read_warning_info()
+                            if verify is None:
+                                self.control_message = "MOS command sent, but BMS state could not be verified"
                             else:
-                                self.control_message = (
-                                    f"{control.title()} MOS command "
-                                    f"did not verify"
-                                )
-
-                        else:
-                            self.control_message = (
-                                "Unable to verify BMS state"
-                            )
-
-                        self.control_busy = False
+                                self.warning = verify
+                                self.charge_on = bool(verify.status_register_3 & CHARGE_BIT)
+                                self.discharge_on = bool(verify.status_register_3 & DISCHARGE_BIT)
+                                actual = self.charge_on if control == "charge" else self.discharge_on
+                                if actual == desired:
+                                    self.control_message = (
+                                        f"{control.title()} MOS {'ON' if desired else 'OFF'} — verified by BMS"
+                                    )
+                                else:
+                                    self.control_message = (
+                                        f"{control.title()} MOS command did not verify; BMS still reports "
+                                        f"{'ON' if actual else 'OFF'}"
+                                    )
+                        except Exception as e:
+                            self.control_message = f"{control.title()} MOS command failed: {e}"
+                        finally:
+                            self.control_busy = False
 
                     # Normal polling
                     data = (
@@ -1845,10 +1829,10 @@ class WattCycleMonitor:
                         f"{self.product.firmware_version} | "
                         f"BLE {ADDRESS}"
                     )
-
+                )
 
             if self.last_log_error:
-                self.footer.config(text=f"Logging warning: {self.last_log_error}")                )
+                self.footer.config(text=f"Logging warning: {self.last_log_error}")
 
         elif self.error:
 
