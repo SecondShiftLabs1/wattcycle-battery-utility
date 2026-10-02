@@ -180,7 +180,7 @@ class WattCycleMonitor:
 
         ttk.Label(win, text="Find your WattCycle battery", font=("Segoe UI", 16, "bold")).pack(anchor="w", padx=18, pady=(18,4))
         ttk.Label(win, text="Scan nearby Bluetooth LE devices, select the WattCycle battery, then click Use Selected. The scan runs in an isolated process so it can be stopped if Windows Bluetooth stalls.", wraplength=615).pack(anchor="w", padx=18, pady=(0,12))
-        status = tk.StringVar(value="Ready to scan. Scanner build: standalone-process v4")
+        status = tk.StringVar(value="Ready to scan. Scanner build: standalone-process v5")
         listbox = tk.Listbox(win, height=11)
         listbox.pack(fill="both", expand=True, padx=18, pady=6)
         ttk.Label(win, textvariable=status, wraplength=615).pack(anchor="w", padx=18, pady=4)
@@ -231,7 +231,11 @@ class WattCycleMonitor:
                 found.extend(devices)
                 listbox.delete(0, "end")
                 for d in found:
-                    listbox.insert("end", f"{d.get('name') or 'Unknown BLE device'}    {d.get('address','')}")
+                    likely = "LIKELY WATTCYCLE  |  " if d.get("likely_wattcycle") else ""
+                    name = d.get("name") or "Unknown BLE device"
+                    rssi = d.get("rssi")
+                    signal = f"  |  RSSI {rssi}" if rssi is not None else ""
+                    listbox.insert("end", f"{likely}{name}  |  {d.get('address','')}{signal}")
                 detail = " | ".join(str(x) for x in diagnostics[-3:])
                 if found:
                     finish_scan(f"Standalone scanner found {len(found)} BLE device(s). {detail}")
