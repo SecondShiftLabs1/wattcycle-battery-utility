@@ -1,7 +1,5 @@
 import asyncio
 import threading
-import multiprocessing
-import queue
 import tkinter as tk
 import sqlite3
 import os
@@ -16,35 +14,6 @@ from tkinter import ttk, messagebox, simpledialog
 from datetime import timedelta
 from wattcycle_ble import WattcycleClient
 from wattcycle_config import load_config, save_config
-
-def ble_scan_process(result_queue, timeout=10.0):
-    """Run direct Bleak discovery in a killable child process."""
-    try:
-        from bleak import BleakScanner
-
-        async def run():
-            rows = {}
-            def detected(device, advertisement_data):
-                address = getattr(device, "address", None) or ""
-                if not address:
-                    return
-                name = getattr(advertisement_data, "local_name", None) or getattr(device, "name", None) or ""
-                rows[address] = {"name": name, "address": address}
-            scanner = BleakScanner(detection_callback=detected)
-            await scanner.start()
-            try:
-                await asyncio.sleep(timeout)
-            finally:
-                await scanner.stop()
-            return list(rows.values())
-
-        result_queue.put(("results", asyncio.run(run())))
-    except BaseException as e:
-        try:
-            result_queue.put(("error", f"{type(e).__name__}: {e}"))
-        except Exception:
-            pass
-
 
 CONFIG = load_config()
 ADDRESS = CONFIG.get("battery_address", "")
@@ -179,8 +148,8 @@ class WattCycleMonitor:
         scan_state = {"proc": None, "output_path": None, "deadline": 0.0}
 
         ttk.Label(win, text="Find your WattCycle battery", font=("Segoe UI", 16, "bold")).pack(anchor="w", padx=18, pady=(18,4))
-        ttk.Label(win, text="Scan nearby Bluetooth LE devices, select the WattCycle battery, then click Use Selected. The scan runs in an isolated process so it can be stopped if Windows Bluetooth stalls.", wraplength=615).pack(anchor="w", padx=18, pady=(0,12))
-        status = tk.StringVar(value="Ready to scan. Scanner build: standalone-process v5")
+        ttk.Label(win, text="Scan for nearby Bluetooth LE devices. WattCycle-compatible batteries are identified and shown first. Select your battery, then click Use Selected.", wraplength=615).pack(anchor="w", padx=18, pady=(0,12))
+        status = tk.StringVar(value="Ready to scan for nearby batteries.")
         listbox = tk.Listbox(win, height=11)
         listbox.pack(fill="both", expand=True, padx=18, pady=6)
         ttk.Label(win, textvariable=status, wraplength=615).pack(anchor="w", padx=18, pady=4)
@@ -231,16 +200,19 @@ class WattCycleMonitor:
                 found.extend(devices)
                 listbox.delete(0, "end")
                 for d in found:
-                    likely = "LIKELY WATTCYCLE  |  " if d.get("likely_wattcycle") else ""
+                    likely = "WattCycle battery detected  |  " if d.get("likely_wattcycle") else ""
                     name = d.get("name") or "Unknown BLE device"
                     rssi = d.get("rssi")
                     signal = f"  |  RSSI {rssi}" if rssi is not None else ""
                     listbox.insert("end", f"{likely}{name}  |  {d.get('address','')}{signal}")
-                detail = " | ".join(str(x) for x in diagnostics[-3:])
-                if found:
-                    finish_scan(f"Standalone scanner found {len(found)} BLE device(s). {detail}")
+                likely_count = sum(1 for d in found if d.get("likely_wattcycle"))
+                if likely_count:
+                    finish_scan(f"Found {likely_count} likely WattCycle battery device(s). Select your battery and click Use Selected.")
+                elif found:
+                    finish_scan(f"Found {len(found)} Bluetooth LE device(s), but none were confidently identified as WattCycle. You can rescan or select a device manually.")
                 else:
-                    finish_scan(f"Standalone scanner found no BLE devices. {detail}")
+                    detail = " | ".join(str(x) for x in diagnostics[-2:])
+                    finish_scan(f"No Bluetooth LE devices found. {detail}")
             except Exception as e:
                 finish_scan(f"Could not read standalone scan result: {type(e).__name__}: {e}")
 
@@ -266,7 +238,7 @@ class WattCycleMonitor:
 
             scan_state["output_path"] = output_path
             scan_state["deadline"] = time.monotonic() + 15.0
-            status.set("STANDALONE SCANNER v4 — launching independent Python BLE scan...")
+            status.set("Starting Bluetooth LE scan...")
             try:
                 proc = subprocess.Popen(
                     [sys.executable, scanner_path, "--timeout", "10", "--output", output_path],
@@ -275,7 +247,7 @@ class WattCycleMonitor:
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 )
                 scan_state["proc"] = proc
-                status.set("STANDALONE SCANNER v4 — scanning Bluetooth LE for 10 seconds...")
+                status.set("Scanning for nearby Bluetooth LE devices...")
                 self.root.after(100, poll_scan)
             except Exception as e:
                 finish_scan(f"Could not launch standalone scanner: {type(e).__name__}: {e}")
