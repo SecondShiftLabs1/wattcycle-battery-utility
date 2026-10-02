@@ -8,6 +8,8 @@ import os
 import time
 import subprocess
 import json
+import sys
+import tempfile
 from collections import deque
 from datetime import datetime
 from tkinter import ttk, messagebox, simpledialog
@@ -174,79 +176,105 @@ class WattCycleMonitor:
         win.grab_set()
         result = {"ok": False}
         found = []
-        scan_state = {"proc": None, "queue": None, "deadline": 0.0}
+        scan_state = {"proc": None, "output_path": None, "deadline": 0.0}
 
         ttk.Label(win, text="Find your WattCycle battery", font=("Segoe UI", 16, "bold")).pack(anchor="w", padx=18, pady=(18,4))
         ttk.Label(win, text="Scan nearby Bluetooth LE devices, select the WattCycle battery, then click Use Selected. The scan runs in an isolated process so it can be stopped if Windows Bluetooth stalls.", wraplength=615).pack(anchor="w", padx=18, pady=(0,12))
-        status = tk.StringVar(value="Ready to scan. Scanner build: advertisement-callback v3")
+        status = tk.StringVar(value="Ready to scan. Scanner build: standalone-process v4")
         listbox = tk.Listbox(win, height=11)
         listbox.pack(fill="both", expand=True, padx=18, pady=6)
         ttk.Label(win, textvariable=status, wraplength=615).pack(anchor="w", padx=18, pady=4)
 
         def finish_scan(message):
             proc = scan_state.get("proc")
-            if proc is not None and proc.is_alive():
-                proc.terminate()
-                proc.join(timeout=1.0)
+            if proc is not None and proc.poll() is None:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=1)
+                except Exception:
+                    pass
+            output_path = scan_state.get("output_path")
             scan_state["proc"] = None
-            scan_state["queue"] = None
+            scan_state["output_path"] = None
+            if output_path:
+                try:
+                    os.remove(output_path)
+                except OSError:
+                    pass
             status.set(message)
             scan_btn.config(state="normal")
 
         def poll_scan():
             proc = scan_state.get("proc")
-            q = scan_state.get("queue")
-            if proc is None or q is None:
-                return
-            try:
-                kind, payload = q.get_nowait()
-                if kind == "results":
-                    found.clear()
-                    found.extend(payload)
-                    listbox.delete(0, "end")
-                    for d in found:
-                        listbox.insert("end", f"{d.get('name') or 'Unknown BLE device'}    {d.get('address','')}")
-                    finish_scan(f"Found {len(found)} BLE device(s). Select the WattCycle battery." if found else "Scan completed but found no BLE devices. Retry or use a known address.")
-                    return
-                if kind == "error":
-                    finish_scan(f"BLE scan failed: {payload}")
-                    return
-            except queue.Empty:
-                pass
-            except Exception as e:
-                finish_scan(f"BLE scan result error: {type(e).__name__}: {e}")
+            output_path = scan_state.get("output_path")
+            if proc is None:
                 return
 
-            if time.monotonic() >= scan_state["deadline"]:
-                finish_scan("BLE scan exceeded 15 seconds and was forcibly stopped. Retry or use a known address.")
+            if time.monotonic() >= scan_state["deadline"] and proc.poll() is None:
+                finish_scan("Standalone BLE scan exceeded 15 seconds and was forcibly stopped.")
                 return
-            if not proc.is_alive():
-                finish_scan(f"BLE scanner exited without results (exit code {proc.exitcode}).")
+
+            code = proc.poll()
+            if code is None:
+                self.root.after(100, poll_scan)
                 return
-            self.root.after(100, poll_scan)
+
+            try:
+                if not output_path or not os.path.exists(output_path):
+                    finish_scan(f"Standalone scanner exited with code {code} but produced no diagnostic file.")
+                    return
+                with open(output_path, "r", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+                devices = payload.get("devices", [])
+                diagnostics = payload.get("diagnostics", [])
+                found.clear()
+                found.extend(devices)
+                listbox.delete(0, "end")
+                for d in found:
+                    listbox.insert("end", f"{d.get('name') or 'Unknown BLE device'}    {d.get('address','')}")
+                detail = " | ".join(str(x) for x in diagnostics[-3:])
+                if found:
+                    finish_scan(f"Standalone scanner found {len(found)} BLE device(s). {detail}")
+                else:
+                    finish_scan(f"Standalone scanner found no BLE devices. {detail}")
+            except Exception as e:
+                finish_scan(f"Could not read standalone scan result: {type(e).__name__}: {e}")
 
         def do_scan():
-            # Ignore duplicate clicks while a scan is already active. The button
-            # is disabled immediately as the first operation, then re-enabled
-            # only by finish_scan().
             active_proc = scan_state.get("proc")
-            if active_proc is not None and active_proc.is_alive():
+            if active_proc is not None and active_proc.poll() is None:
                 return
             scan_btn.config(state="disabled")
-            status.set("ISOLATED SCANNER ACTIVE — starting child process...")
             listbox.delete(0, "end")
             found.clear()
-            q = multiprocessing.Queue()
-            proc = multiprocessing.Process(target=ble_scan_process, args=(q, 10.0), daemon=True)
-            scan_state["queue"] = q
-            scan_state["proc"] = proc
-            scan_state["deadline"] = time.monotonic() + 15.0
+
+            scanner_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wattcycle_ble_scan.py")
+            if not os.path.exists(scanner_path):
+                finish_scan("Scanner helper wattcycle_ble_scan.py is missing from the application folder.")
+                return
+
+            fd, output_path = tempfile.mkstemp(prefix="wattcycle_ble_", suffix=".json")
+            os.close(fd)
             try:
-                proc.start()
-                status.set("ADVERTISEMENT SCAN — listening for nearby BLE devices for 10 seconds...")
+                os.remove(output_path)
+            except OSError:
+                pass
+
+            scan_state["output_path"] = output_path
+            scan_state["deadline"] = time.monotonic() + 15.0
+            status.set("STANDALONE SCANNER v4 — launching independent Python BLE scan...")
+            try:
+                proc = subprocess.Popen(
+                    [sys.executable, scanner_path, "--timeout", "10", "--output", output_path],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                scan_state["proc"] = proc
+                status.set("STANDALONE SCANNER v4 — scanning Bluetooth LE for 10 seconds...")
                 self.root.after(100, poll_scan)
             except Exception as e:
-                finish_scan(f"Could not start BLE scanner: {type(e).__name__}: {e}")
+                finish_scan(f"Could not launch standalone scanner: {type(e).__name__}: {e}")
 
         def use_selected():
             global ADDRESS, CONFIG
