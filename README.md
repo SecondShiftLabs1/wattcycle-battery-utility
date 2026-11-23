@@ -25,6 +25,10 @@ ASCOM Alpaca / N.I.N.A. support is optional.
 - Optional ASCOM Alpaca SafetyMonitor and Switch integration
 - Stale/missing telemetry fails **Unsafe**
 
+## Display modes
+
+The UI development build includes a tabbed dashboard, dark/light themes, live telemetry charts, and two slim overlays. Select Horizontal slim or Vertical slim in the header. Double-click the overlay to restore the full dashboard; right-click for mode, opacity, always-on-top, metric selection, theme and exit. Drag to reposition; positions and preferences are remembered. Slim mode does not stop monitoring or logging. Stale readings are identified as last known. Test on Windows before relying on the new interface unattended.
+
 ## First-run setup
 
 1. Install Python 3.11+ on Windows.
