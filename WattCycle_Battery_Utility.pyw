@@ -14,6 +14,7 @@ from tkinter import ttk, messagebox, simpledialog
 from datetime import timedelta
 from wattcycle_ble import WattcycleClient
 from wattcycle_config import load_config, save_config
+from wattcycle_display import Display, snapshot
 
 CONFIG = load_config()
 ADDRESS = CONFIG.get("battery_address", "")
@@ -127,6 +128,8 @@ class WattCycleMonitor:
 
         self.init_database()
 
+        self.display = Display(self, CONFIG, save_config)
+        self.display.db_path = DB_PATH
         self.build_gui()
 
         self.thread = threading.Thread(
@@ -137,6 +140,8 @@ class WattCycleMonitor:
 
         self.update_gui()
         self.root.protocol("WM_DELETE_WINDOW", self.close)
+        if CONFIG.get("ui_mode") in ("horizontal", "vertical"):
+            self.root.after(100, lambda: self.display.open(CONFIG["ui_mode"]))
 
     def ensure_battery_configured(self):
         global ADDRESS, CONFIG, MOS_CONTROL_ENABLED
@@ -694,60 +699,65 @@ class WattCycleMonitor:
 
     def build_gui(self):
 
-        # Scrollable content keeps every control reachable without requiring
-        # an enormous window as the monitor grows.
-        shell = ttk.Frame(self.root)
+        shell = ttk.Frame(self.root, padding=10)
         shell.pack(fill="both", expand=True)
-        canvas = tk.Canvas(shell, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(shell, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side="right", fill="y")
-        canvas.pack(side="left", fill="both", expand=True)
-
-        main = ttk.Frame(canvas, padding=14)
-        window_id = canvas.create_window((0, 0), window=main, anchor="nw")
-        main.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(window_id, width=e.width))
-        canvas.bind_all("<MouseWheel>", lambda e: canvas.yview_scroll(int(-1 * (e.delta / 120)), "units"))
-
-        ttk.Label(
-            main,
-            text="WATTCYCLE",
-            font=("Segoe UI", 22, "bold")
-        ).pack()
-
-        ttk.Label(
-            main,
-            text="Bluetooth LiFePO4 Battery Monitor",
-            font=("Segoe UI", 11)
-        ).pack(pady=(0, 10))
-
-        self.connection_label = ttk.Label(
-            main,
-            text="Connecting...",
-            font=("Segoe UI", 10)
-        )
-        self.connection_label.pack()
-        ttk.Button(main, text="Settings", command=self.show_settings).pack(pady=(6, 0))
+        header = ttk.Frame(shell)
+        header.pack(fill="x")
+        ttk.Label(header, text="WattCycle Utility", font=("Segoe UI", 19, "bold")).pack(side="left")
+        ttk.Button(header, text="Theme", command=self.display.toggle_theme).pack(side="right", padx=3)
+        ttk.Button(header, text="Vertical slim", command=lambda: self.display.open("vertical")).pack(side="right", padx=3)
+        ttk.Button(header, text="Horizontal slim", command=lambda: self.display.open("horizontal")).pack(side="right", padx=3)
+        self.connection_label = ttk.Label(shell, text="Connecting...")
+        self.connection_label.pack(anchor="w", pady=4)
+        self.alert_status = ttk.Label(shell, text="No active alerts", wraplength=680)
+        self.alert_status.pack(anchor="w")
+        self.status_detail = ttk.Label(shell, text="Waiting for telemetry")
+        self.status_detail.pack(anchor="w", pady=(0,5))
+        tabs = ttk.Notebook(shell)
+        tabs.pack(fill="both", expand=True)
+        def page(name):
+            frame = ttk.Frame(tabs, padding=10)
+            tabs.add(frame, text=name)
+            return frame
+        main = page("Overview")
+        diagnostics = page("Diagnostics")
+        history = page("History")
+        automation = page("Automation")
+        settings = page("Settings")
+        self.root.geometry("850x790")
+        self.root.minsize(720, 690)
+        hero = ttk.Frame(main)
+        hero.pack(fill="x")
+        hero.columnconfigure(0, weight=1)
+        hero.columnconfigure(1, weight=1)
+        battery = ttk.Frame(hero)
+        battery.grid(row=0,column=0,sticky="ew")
+        estimate = ttk.Frame(hero)
+        estimate.grid(row=0,column=1,sticky="ew")
+        ttk.Label(estimate,text="Estimated runtime (15 min average)").pack()
+        self.primary_runtime = ttk.Label(estimate,text="--",font=("Segoe UI",28,"bold"))
+        self.primary_runtime.pack()
+        self.reserve_runtime = ttk.Label(estimate,text="Until SOC reserve: --")
+        self.reserve_runtime.pack()
 
         self.soc_label = ttk.Label(
-            main,
+            battery,
             text="--%",
             font=("Segoe UI", 52, "bold")
         )
         self.soc_label.pack(pady=(8, 0))
 
         self.capacity_label = ttk.Label(
-            main,
+            battery,
             text="-- Ah remaining",
             font=("Segoe UI", 11)
         )
         self.capacity_label.pack()
 
         self.progress = ttk.Progressbar(
-            main,
+            battery,
             maximum=100,
-            length=520
+            length=250
         )
         self.progress.pack(pady=10)
 
@@ -790,9 +800,11 @@ class WattCycleMonitor:
         self.avg15_value = self.make_readout(averages, "15 Min Avg", 1)
         self.avg_runtime_value = self.make_readout(averages, "Est. Runtime", 2)
 
+        self.display.build_graph(main)
+
         # Automatic session summary
         session = ttk.LabelFrame(
-            main,
+            history,
             text=" Discharge Session ",
             padding=10
         )
@@ -818,7 +830,7 @@ class WattCycleMonitor:
 
         # Cells
         cells = ttk.LabelFrame(
-            main,
+            diagnostics,
             text=" Cell Voltages ",
             padding=12
         )
@@ -858,7 +870,7 @@ class WattCycleMonitor:
 
         # Temperatures
         temperatures = ttk.LabelFrame(
-            main,
+            diagnostics,
             text=" Temperatures ",
             padding=12
         )
@@ -879,7 +891,7 @@ class WattCycleMonitor:
 
         # BMS information
         bms = ttk.LabelFrame(
-            main,
+            diagnostics,
             text=" BMS Status ",
             padding=12
         )
@@ -900,7 +912,7 @@ class WattCycleMonitor:
 
         # MOS control
         controls = ttk.LabelFrame(
-            main,
+            diagnostics,
             text=" BMS Control ",
             padding=12
         )
@@ -983,16 +995,9 @@ class WattCycleMonitor:
             pady=(10, 0)
         )
 
-        alert_frame = ttk.LabelFrame(main, text=" Alerts ", padding=8)
-        alert_frame.pack(fill="x", pady=6)
-        self.alert_status = ttk.Label(
-            alert_frame, text="No active alerts", font=("Segoe UI", 9)
-        )
-        self.alert_status.pack(anchor="w")
-
         # N.I.N.A. integration. The monitor publishes NORMAL/LOW/CRITICAL/
         # EMERGENCY to a JSON state file for the N.I.N.A. safety bridge.
-        nina = ttk.LabelFrame(main, text=" N.I.N.A. Integration ", padding=10)
+        nina = ttk.LabelFrame(automation, text=" N.I.N.A. Integration ", padding=10)
         nina.pack(fill="x", pady=6)
         for i in range(4):
             nina.columnconfigure(i, weight=1)
@@ -1019,8 +1024,12 @@ class WattCycleMonitor:
             font=("Segoe UI", 8)
         ).grid(row=3, column=0, columnspan=4, sticky="w", pady=(7, 0))
 
+        ttk.Label(settings, text="Application preferences", font=("Segoe UI",16,"bold")).pack(anchor="w")
+        ttk.Button(settings, text="Telemetry, protection and logging settings", command=self.show_settings).pack(anchor="w", pady=8)
+        ttk.Button(settings, text="Switch dark/light theme", command=self.display.toggle_theme).pack(anchor="w", pady=4)
+        ttk.Label(settings, text="Slim display preferences are available from its right-click menu.", wraplength=620).pack(anchor="w", pady=8)
         self.footer = ttk.Label(
-            main,
+            shell,
             text="Waiting for battery...",
             font=("Segoe UI", 8)
         )
@@ -1850,10 +1859,18 @@ class WattCycleMonitor:
                 )
             )
 
-        self.root.after(
-            500,
-            self.update_gui
-        )
+        s = snapshot(self, CONFIG)
+        age = s["age"]
+        self.status_detail.config(text=f"{s['status']} | " + (f"Telemetry age: {max(0,int(age))}s" if age is not None else "No telemetry") + (" | LAST KNOWN READINGS" if self.data is not None and not s["fresh"] else ""), foreground=s["color"])
+        self.soc_label.config(foreground=s["color"])
+        self.primary_runtime.config(text=s["runtime"])
+        self.reserve_runtime.config(text=f"Until {NINA_CRITICAL_SOC}% SOC reserve: {s['reserve']}")
+        if not s["fresh"]:
+            self.connection_label.config(text="Disconnected / waiting for fresh telemetry")
+        self.charge_button.config(state="normal" if s["fresh"] and MOS_CONTROL_ENABLED and not self.control_busy and self.charge_on is not None else "disabled")
+        self.discharge_button.config(state="normal" if s["fresh"] and MOS_CONTROL_ENABLED and not self.control_busy and self.discharge_on is not None else "disabled")
+        self.display.update()
+        self.root.after(500, self.update_gui)
 
     @staticmethod
     def temp_string(celsius):
@@ -1861,6 +1878,9 @@ class WattCycleMonitor:
         return f"{fahrenheit:.1f}°F"
 
     def close(self):
+        if hasattr(self, 'display'):
+            self.display.remember()
+            self.display.persist()
         self.running = False
         # Preserve a real active session if the monitor is closed before the
         # normal five-minute idle timeout can finalize it.
