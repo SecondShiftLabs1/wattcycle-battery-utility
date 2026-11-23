@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added tabbed dashboard, dark/light themes, horizontal and vertical slim overlays, live telemetry charts and SOC reserve estimate.
+- Added persistent display preferences, drag/snap, opacity and stale telemetry indicators.
+
 - Fixed first-run BLE discovery getting stuck when the Bluetooth stack or scanner fails to return.
 - Discovery now runs as an isolated child process with a 15-second parent-enforced kill timeout.
 - Added an outer scan timeout, direct Bleak/Windows fallback, progress messages, and diagnostic errors.
