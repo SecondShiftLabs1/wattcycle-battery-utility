@@ -51,6 +51,29 @@ CHARGE_BIT = 0x02
 DISCHARGE_BIT = 0x04
 
 
+# Flag meanings from qume/wattcycle_ble PROTOCOL.md; firmware may vary.
+PROTECTION_FLAGS = {
+    "status_register_1": ("Cell overcharge", "Cell overdischarge", "Pack overcharge", "Pack overdischarge", "Charge overcurrent", "Discharge overcurrent", "Hardware protection", "Charge voltage high"),
+    "status_register_2": ("Charge high temperature", "Discharge high temperature", "Charge low temperature", "Discharge low temperature", "MOS high temperature", "Environment high temperature", "Environment low temperature"),
+    "status_register_5": ("Cell fault", "Charge MOS fault", "Discharge MOS fault", "Temperature fault"),
+}
+
+def protection_flags(w):
+    if w is None:
+        return []
+    flags = []
+    for field, names in PROTECTION_FLAGS.items():
+        value = int(getattr(w, field, 0) or 0)
+        for bit in range(8):
+            if value & (1 << bit):
+                flags.append(names[bit] if bit < len(names) else f"{field} bit {bit} (undocumented)")
+    return flags
+
+def charging_protection(w):
+    if w is None:
+        return False
+    return bool((w.status_register_1 & 0x95) or (w.status_register_2 & 0x75) or (w.status_register_5 & 0x0b))
+
 class WattCycleMonitor:
 
     def __init__(self, root):
@@ -910,8 +933,11 @@ class WattCycleMonitor:
             bms, "Balancing", 1
         )
         self.warning_value = self.make_readout(
-            bms, "Warnings", 2
+            bms, "Warnings / protection", 2
         )
+
+        self.protection_label = ttk.Label(bms, text="Protection status unknown", wraplength=650)
+        self.protection_label.grid(row=1,column=0,columnspan=3,sticky="w",pady=(6,0))
 
         # MOS control
         controls = ttk.LabelFrame(
@@ -1362,7 +1388,7 @@ class WattCycleMonitor:
 
     def copy_power_diagnostics(self):
         self.root.clipboard_clear()
-        self.root.clipboard_append("\n".join((self.raw_power_label.cget("text"), self.activity_label.cget("text"), self.power_trace, str(getattr(self, "control_message", "")))))
+        self.root.clipboard_append("\n".join((self.raw_power_label.cget("text"), self.protection_label.cget("text"), self.activity_label.cget("text"), self.power_trace, str(getattr(self, "control_message", "")))))
 
     def request_power(self, control, desired):
         if not MOS_CONTROL_ENABLED or not self.connected or self.control_busy or self.unverified_control is not None:
@@ -1513,7 +1539,7 @@ class WattCycleMonitor:
                                     verified = True
                                     break
                             if not verified:
-                                self.control_message = f"{name}: confirmation pending (register {before_raw!r} → {last_raw!r}; response {response!r})"
+                                self.control_message = (f"{name}: BMS reports protection; switch state unconfirmed" if control == "charge" and charging_protection(self.warning) else f"{name}: confirmation pending (register {before_raw!r} → {last_raw!r}; response {response!r})")
                         except Exception as e:
                             self.control_message = f"{name}: command or verification error: {type(e).__name__}: {e}"
                         finally:
@@ -1560,7 +1586,7 @@ class WattCycleMonitor:
                             self.control_message = f"{name} {'enabled' if desired else 'disabled'} — verified by BMS (delayed)"
                             self.unverified_control = None
                         elif time.monotonic() >= expires:
-                            self.control_message = f"{name}: requested state not confirmed by BMS (see diagnostics)"
+                            self.control_message = (f"{name}: unconfirmed; reported protection may inhibit charging" if control == "charge" and charging_protection(warning) else f"{name}: requested state not confirmed by BMS (see diagnostics)")
                             self.unverified_control = None
 
                     await asyncio.sleep(
@@ -1850,9 +1876,14 @@ class WattCycleMonitor:
             w = self.warning
             fields = ("status_register_1","status_register_2","status_register_3","status_register_5","battery_mode","warning_register_1","warning_register_2","charge_current_state","discharge_current_state")
             self.raw_power_label.config(text="BMS: " + " | ".join(f"{k}={getattr(w,k,None)}" for k in fields))
-            self.charge_state.config(text="Unconfirmed (bit " + ("set)" if self.charge_on else "clear)"))
+            flags = protection_flags(w)
+            self.protection_label.config(text="Reported protections / faults: " + ("; ".join(flags) if flags else "None"), foreground="#e5a323" if flags else self.display.colors[2])
+            self.warning_value.config(text="ACTIVE" if flags or w.warning_register_1 or w.warning_register_2 else "None")
+            self.charge_state.config(text="Protection active" if charging_protection(w) else "Unconfirmed (bit " + ("set)" if self.charge_on else "clear)"))
         else:
             self.raw_power_label.config(text="BMS status missing or stale")
+            self.protection_label.config(text="Protection status unknown", foreground=self.display.colors[3])
+            self.warning_value.config(text="Unknown")
             self.charge_state.config(text="Unknown")
             self.discharge_state.config(text="Unknown")
         d = self.data
