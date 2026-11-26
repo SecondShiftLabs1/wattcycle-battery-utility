@@ -69,6 +69,7 @@ class WattCycleMonitor:
         self.discharge_on = None
         self.control_busy = False
         self.pending_command = None
+        self.unverified_control = None
         self.last_external_command_id = None
 
         os.makedirs(DATA_DIR, exist_ok=True)
@@ -913,7 +914,7 @@ class WattCycleMonitor:
         # MOS control
         controls = ttk.LabelFrame(
             diagnostics,
-            text=" BMS Control ",
+            text=" Battery Power Controls ",
             padding=12
         )
         controls.pack(fill="x", pady=6)
@@ -932,7 +933,7 @@ class WattCycleMonitor:
 
         ttk.Label(
             charge,
-            text="Charge MOS",
+            text="Charging Input",
             font=("Segoe UI", 10)
         ).pack()
 
@@ -961,7 +962,7 @@ class WattCycleMonitor:
 
         ttk.Label(
             discharge,
-            text="Discharge MOS",
+            text="Battery Output",
             font=("Segoe UI", 10)
         ).pack()
 
@@ -1076,7 +1077,7 @@ class WattCycleMonitor:
         form.columnconfigure(0, weight=1)
 
         mos_var = tk.BooleanVar(value=MOS_CONTROL_ENABLED)
-        ttk.Checkbutton(outer, text="Enable Charge/Discharge MOS controls", variable=mos_var).pack(anchor="w", pady=(14, 2))
+        ttk.Checkbutton(outer, text="Allow battery power control", variable=mos_var).pack(anchor="w", pady=(14, 2))
         ttk.Label(
             outer,
             text="MOS control can disable charging or battery output. Keep this off unless you intentionally need BMS switching.",
@@ -1355,7 +1356,7 @@ class WattCycleMonitor:
 
             if not messagebox.askyesno(
                 "Disable Charging",
-                "Turn OFF the Charge MOS?\n\n"
+                "Disable charging input?\n\n"
                 "The battery will no longer accept charge "
                 "until it is turned back on."
             ):
@@ -1390,7 +1391,7 @@ class WattCycleMonitor:
 
             if not messagebox.askyesno(
                 "Disable Battery Output",
-                "Turn OFF the Discharge MOS?\n\n"
+                "Disable battery output?\n\n"
                 "This will remove battery output power.\n\n"
                 "Any equipment powered by this battery "
                 "may shut down immediately."
@@ -1481,11 +1482,15 @@ class WattCycleMonitor:
                     # Process GUI/N.I.N.A. command
                     if self.pending_command is not None and not MOS_CONTROL_ENABLED:
                         self.pending_command = None
-                        self.control_message = "MOS control blocked by config.json"
+                        self.control_message = "Battery power control blocked by settings"
+                        self.control_busy = False
 
                     if self.pending_command is not None:
                         control, desired, command = self.pending_command
                         self.pending_command = None
+                        self.unverified_control = None
+                        name = 'Charging input' if control == 'charge' else 'Battery output'
+                        self.control_message = f'{name}: waiting for BMS confirmation...'
                         try:
                             # Refresh state immediately before a write. GUI state may
                             # be several seconds old by the time the user clicks.
@@ -1499,27 +1504,40 @@ class WattCycleMonitor:
                                     self.control_message = f"{control.title()} MOS already {'ON' if desired else 'OFF'} — no command sent"
                                     continue
 
-                            await client.send_command(command, timeout=3)
-                            await asyncio.sleep(1)
-                            verify = await client.read_warning_info()
-                            if verify is None:
-                                self.control_message = "MOS command sent, but BMS state could not be verified"
-                            else:
+                            # Send once, then reconcile delayed status without resending.
+                            self.unverified_control = (control, desired, time.monotonic() + 60)
+                            before_raw = before.status_register_3 if before is not None else None
+                            self.control_message = f"{name}: sending command..."
+                            response = await client.send_command(command, timeout=3)
+                            self.control_message = f"{name}: waiting for BMS status..."
+                            deadline = time.monotonic() + 10
+                            verified = False
+                            last_raw = None
+                            while self.running and client.is_connected and time.monotonic() < deadline:
+                                await asyncio.sleep(1)
+                                remaining = deadline - time.monotonic()
+                                if remaining <= 0:
+                                    break
+                                try:
+                                    verify = await asyncio.wait_for(client.read_warning_info(), timeout=remaining)
+                                except asyncio.TimeoutError:
+                                    break
+                                if verify is None:
+                                    continue
                                 self.warning = verify
-                                self.charge_on = bool(verify.status_register_3 & CHARGE_BIT)
-                                self.discharge_on = bool(verify.status_register_3 & DISCHARGE_BIT)
+                                last_raw = verify.status_register_3
+                                self.charge_on = bool(last_raw & CHARGE_BIT)
+                                self.discharge_on = bool(last_raw & DISCHARGE_BIT)
                                 actual = self.charge_on if control == "charge" else self.discharge_on
                                 if actual == desired:
-                                    self.control_message = (
-                                        f"{control.title()} MOS {'ON' if desired else 'OFF'} — verified by BMS"
-                                    )
-                                else:
-                                    self.control_message = (
-                                        f"{control.title()} MOS command did not verify; BMS still reports "
-                                        f"{'ON' if actual else 'OFF'}"
-                                    )
+                                    self.control_message = f"{name} {'enabled' if desired else 'disabled'} — verified by BMS"
+                                    self.unverified_control = None
+                                    verified = True
+                                    break
+                            if not verified:
+                                self.control_message = f"{name}: confirmation pending (register {before_raw!r} → {last_raw!r}; response {response!r})"
                         except Exception as e:
-                            self.control_message = f"{control.title()} MOS command failed: {e}"
+                            self.control_message = f"{name}: command or verification error: {type(e).__name__}: {e}"
                         finally:
                             self.control_busy = False
 
@@ -1554,6 +1572,17 @@ class WattCycleMonitor:
                             warning.status_register_3
                             & DISCHARGE_BIT
                         )
+
+                    if self.unverified_control is not None:
+                        control, desired, expires = self.unverified_control
+                        name = "Charging input" if control == "charge" else "Battery output"
+                        actual = self.charge_on if control == "charge" else self.discharge_on
+                        if warning is not None and actual == desired and time.monotonic() < expires:
+                            self.control_message = f"{name} {'enabled' if desired else 'disabled'} — verified by BMS (delayed)"
+                            self.unverified_control = None
+                        elif time.monotonic() >= expires:
+                            self.control_message = f"{name}: requested state not confirmed by BMS"
+                            self.unverified_control = None
 
                     await asyncio.sleep(
                         REFRESH_SECONDS
