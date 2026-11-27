@@ -3,6 +3,7 @@ import tkinter as tk
 from tkinter import ttk, simpledialog
 import time
 import math
+import customtkinter as ctk
 
 def palette(root, dark):
     bg, panel, fg, muted = ("#101722", "#1b2635", "#e6edf6", "#a0aec0") if dark else ("#eef2f6", "#ffffff", "#172334", "#526174")
@@ -77,6 +78,8 @@ class Display:
         self.dark = not self.dark
         self.cfg["ui_dark"] = self.dark
         self.colors = palette(self.root, self.dark)
+        if self.chart is not None:
+            self.draw_graph()
         if self.slim is not None:
             mode = self.mode
             self.open(mode)
@@ -214,16 +217,17 @@ class Display:
             self.draw_graph()
 
     def build_graph(self,parent):
-        frame=ttk.LabelFrame(parent,text=" Live telemetry ",padding=8)
-        frame.pack(fill="both",expand=True,pady=5)
-        bar=ttk.Frame(frame); bar.pack(fill="x")
+        frame=ctk.CTkFrame(parent,fg_color="transparent")
+        frame.pack(fill="both",expand=True,padx=12,pady=8)
+        bar=ctk.CTkFrame(frame,fg_color="transparent")
+        bar.pack(fill="x",pady=(0,4))
+        ctk.CTkLabel(bar,text="Live telemetry",font=("Segoe UI",14,"bold")).pack(side="left")
         self.metric=tk.StringVar(value="Power")
         self.period=tk.StringVar(value="60 min")
-        for var,values in ((self.metric,["Power","Current","Voltage","SOC","Temperature"]),(self.period,["15 min","60 min","6 hours","24 hours"])):
-            cb=ttk.Combobox(bar,textvariable=var,values=values,state="readonly",width=12)
-            cb.pack(side="left",padx=3)
-            cb.bind("<<ComboboxSelected>>",lambda e:self.draw_graph())
-        self.chart=tk.Canvas(frame,height=125,highlightthickness=0)
+        for var,values in ((self.period,["15 min","60 min","6 hours","24 hours"]),(self.metric,["Power","Current","Voltage","SOC","Temperature"])):
+            cb=ctk.CTkOptionMenu(bar,variable=var,values=values,width=110,command=lambda value:self.draw_graph(),fg_color=("#e2e8f0","#344256"),button_color=("#cbd5e1","#526174"),text_color=("#172334","#e6edf6"))
+            cb.pack(side="right",padx=3)
+        self.chart=tk.Canvas(frame,height=150,highlightthickness=0,bg=self.colors[1])
         self.chart.pack(fill="both",expand=True)
         self.chart.bind("<Configure>",lambda e:self.draw_graph())
 
@@ -251,14 +255,14 @@ class Display:
         left,top,right,bottom=52,10,width-12,height-22
         for i in range(3):
             y=top+(bottom-top)*i/2
-            c.create_line(left,y,right,y,fill=muted,stipple="gray25")
+            c.create_line(left,y,right,y,fill="#344256" if self.dark else "#dbe2ea")
             c.create_text(left-5,y,text=f"{hi-(hi-lo)*i/2:.1f}",anchor="e",fill=muted)
         prior=None
         for t,v in pts:
             x=left+(right-left)*t/(mins*60); y=bottom-(bottom-top)*(v-lo)/(hi-lo)
             if prior and t-prior[0] <= max(30,float(self.cfg.get("log_interval_seconds",5))*4):
-                c.create_line(prior[1],prior[2],x,y,fill="#4096ed",width=2)
-            else: c.create_oval(x-1,y-1,x+1,y+1,fill="#4096ed",outline="")
+                c.create_line(prior[1],prior[2],x,y,fill="#34d399" if self.dark else "#16834b",width=2)
+            else: c.create_oval(x-1,y-1,x+1,y+1,fill="#34d399" if self.dark else "#16834b",outline="")
             prior=(t,x,y)
         c.create_text(left,height-8,text=self.period.get()+" ago",anchor="w",fill=muted)
         c.create_text(right,height-8,text="Now",anchor="e",fill=muted)
