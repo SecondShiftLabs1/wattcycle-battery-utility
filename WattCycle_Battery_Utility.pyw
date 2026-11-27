@@ -725,7 +725,7 @@ class WattCycleMonitor:
 
     def build_gui(self):
 
-        shell = ttk.Frame(self.root, padding=10)
+        shell = ttk.Frame(self.root, padding=16)
         shell.pack(fill="both", expand=True)
         header = ttk.Frame(shell)
         header.pack(fill="x")
@@ -734,11 +734,11 @@ class WattCycleMonitor:
         ttk.Button(header, text="Vertical slim", command=lambda: self.display.open("vertical")).pack(side="right", padx=3)
         ttk.Button(header, text="Horizontal slim", command=lambda: self.display.open("horizontal")).pack(side="right", padx=3)
         self.connection_label = ttk.Label(shell, text="Connecting...")
-        self.connection_label.pack(anchor="w", pady=4)
+        self.connection_label.pack(anchor="w", pady=(6,0))
         self.alert_status = ttk.Label(shell, text="No active alerts", wraplength=680)
-        self.alert_status.pack(anchor="w")
+        self.alert_status.pack(anchor="w", pady=(2,0))
         self.status_detail = ttk.Label(shell, text="Waiting for telemetry")
-        self.status_detail.pack(anchor="w", pady=(0,5))
+        self.status_detail.pack(anchor="w", pady=(0,10))
         tabs = ttk.Notebook(shell)
         tabs.pack(fill="both", expand=True)
         def page(name):
@@ -746,37 +746,37 @@ class WattCycleMonitor:
             tabs.add(frame, text=name)
             return frame
         main = page("Overview")
-        diagnostics = page("Diagnostics")
+        diagnostics = page("Battery")
         history = page("History")
         automation = page("Automation")
         settings = page("Settings")
-        self.root.geometry("850x790")
-        self.root.minsize(720, 690)
+        self.root.geometry("850x720")
+        self.root.minsize(740, 620)
         hero = ttk.Frame(main)
         hero.pack(fill="x")
         hero.columnconfigure(0, weight=1)
         hero.columnconfigure(1, weight=1)
-        battery = ttk.Frame(hero)
-        battery.grid(row=0,column=0,sticky="ew")
-        estimate = ttk.Frame(hero)
-        estimate.grid(row=0,column=1,sticky="ew")
-        ttk.Label(estimate,text="Estimated runtime (15 min average)").pack()
-        self.primary_runtime = ttk.Label(estimate,text="--",font=("Segoe UI",28,"bold"))
+        battery = ttk.Frame(hero, style="Card.TFrame", padding=12)
+        battery.grid(row=0,column=0,sticky="nsew",padx=(0,5))
+        estimate = ttk.Frame(hero, style="Card.TFrame", padding=12)
+        estimate.grid(row=0,column=1,sticky="nsew",padx=(5,0))
+        ttk.Label(estimate,text="Estimated runtime · 15 min average",style="CardMuted.TLabel").pack(pady=(12,4))
+        self.primary_runtime = ttk.Label(estimate,text="--",font=("Segoe UI",28,"bold"),style="Card.TLabel")
         self.primary_runtime.pack()
-        self.reserve_runtime = ttk.Label(estimate,text="Until SOC reserve: --")
+        self.reserve_runtime = ttk.Label(estimate,text="Until SOC reserve: --",style="CardMuted.TLabel")
         self.reserve_runtime.pack()
 
         self.soc_label = ttk.Label(
             battery,
             text="--%",
-            font=("Segoe UI", 52, "bold")
+            style="Card.TLabel", font=("Segoe UI", 44, "bold")
         )
         self.soc_label.pack(pady=(8, 0))
 
         self.capacity_label = ttk.Label(
             battery,
             text="-- Ah remaining",
-            font=("Segoe UI", 11)
+            style="CardMuted.TLabel", font=("Segoe UI", 11)
         )
         self.capacity_label.pack()
 
@@ -785,7 +785,7 @@ class WattCycleMonitor:
             maximum=100,
             length=250
         )
-        self.progress.pack(pady=10)
+        self.progress.pack(pady=(8,4),fill="x")
 
         # Electrical
         electrical = ttk.LabelFrame(
@@ -1029,12 +1029,11 @@ class WattCycleMonitor:
         )
 
         self.raw_power_label = ttk.Label(controls, text="Waiting for fresh BMS status", wraplength=650)
-        self.raw_power_label.grid(row=2,column=0,columnspan=2,sticky="w")
+        # Raw registers are retained for the advanced troubleshooting dialog.
         self.activity_label = ttk.Label(controls, text="Measured activity: unknown", wraplength=650)
-        self.activity_label.grid(row=3,column=0,columnspan=2,sticky="w")
+        self.activity_label.grid(row=2,column=0,columnspan=2,sticky="w",pady=(6,0))
         self.trace_label = ttk.Label(controls, text="", wraplength=650)
-        self.trace_label.grid(row=4,column=0,columnspan=2,sticky="w")
-        ttk.Button(controls,text="Copy diagnostics",command=self.copy_power_diagnostics).grid(row=5,column=0,columnspan=2)
+        # Command trace is hidden during normal operation.
         self.control_status.configure(wraplength=650)
 
         # N.I.N.A. integration. The monitor publishes NORMAL/LOW/CRITICAL/
@@ -1069,6 +1068,7 @@ class WattCycleMonitor:
         ttk.Label(settings, text="Application preferences", font=("Segoe UI",16,"bold")).pack(anchor="w")
         ttk.Button(settings, text="Telemetry, protection and logging settings", command=self.show_settings).pack(anchor="w", pady=8)
         ttk.Button(settings, text="Switch dark/light theme", command=self.display.toggle_theme).pack(anchor="w", pady=4)
+        ttk.Button(settings, text="Advanced troubleshooting", command=self.show_power_diagnostics).pack(anchor="w", pady=4)
         ttk.Label(settings, text="Slim display preferences are available from its right-click menu.", wraplength=620).pack(anchor="w", pady=8)
         self.footer = ttk.Label(
             shell,
@@ -1371,20 +1371,51 @@ class WattCycleMonitor:
         frame = ttk.Frame(parent)
         frame.grid(row=0, column=column, sticky="ew")
 
-        ttk.Label(frame, text=title).pack()
+        ttk.Label(frame, text=title, style="Muted.TLabel").pack(pady=(2,3))
 
         value = ttk.Label(
             frame,
             text="--",
-            font=("Segoe UI", 13, "bold")
+            font=("Segoe UI", 17, "bold")
         )
-        value.pack()
+        value.pack(pady=(0,3))
 
         return value
 
     # ---------------------------------------------------------
     # BUTTONS
     # ---------------------------------------------------------
+
+    def friendly_power_message(self):
+        message = str(getattr(self,"control_message",""))
+        if "confirmation pending" in message:
+            return message.split(":")[0] + ": waiting for battery confirmation"
+        if "command or verification error" in message:
+            return message.split(":")[0] + ": communication error (see Settings)"
+        return message.replace("MOS", "power switch")
+
+    def show_power_diagnostics(self):
+        win = tk.Toplevel(self.root)
+        win.title("Advanced troubleshooting")
+        win.geometry("700x420")
+        win.transient(self.root)
+        frame = ttk.Frame(win,padding=16)
+        frame.pack(fill="both",expand=True)
+        ttk.Label(frame,text="Battery communication diagnostics",font=("Segoe UI",16,"bold")).pack(anchor="w")
+        ttk.Label(frame,text="Snapshot at time of opening. Copy or refresh for troubleshooting.").pack(anchor="w",pady=(4,10))
+        content = tk.Text(frame,wrap="word",height=12,background=self.display.colors[1],foreground=self.display.colors[2],font=("Consolas",10))
+        content.pack(fill="both",expand=True)
+        def refresh():
+            content.config(state="normal")
+            content.delete("1.0","end")
+            content.insert("1.0", "\n\n".join((self.raw_power_label.cget("text"),self.protection_label.cget("text"),self.activity_label.cget("text"),self.power_trace,str(getattr(self,"control_message","")))))
+            content.config(state="disabled")
+        buttons=ttk.Frame(frame)
+        buttons.pack(fill="x",pady=(10,0))
+        ttk.Button(buttons,text="Refresh",command=refresh).pack(side="left")
+        ttk.Button(buttons,text="Copy diagnostics",command=self.copy_power_diagnostics).pack(side="left",padx=8)
+        ttk.Button(buttons,text="Close",command=win.destroy).pack(side="right")
+        refresh()
 
     def copy_power_diagnostics(self):
         self.root.clipboard_clear()
@@ -1829,7 +1860,7 @@ class WattCycleMonitor:
 
             if hasattr(self, "control_message"):
                 self.control_status.config(
-                    text=self.control_message
+                    text=self.friendly_power_message()
                 )
 
             self.alert_status.config(text=self.last_alert_text)
@@ -1865,9 +1896,11 @@ class WattCycleMonitor:
 
         s = snapshot(self, CONFIG)
         age = s["age"]
-        self.status_detail.config(text=f"{s['status']} | " + (f"Telemetry age: {max(0,int(age))}s" if age is not None else "No telemetry") + (" | LAST KNOWN READINGS" if self.data is not None and not s["fresh"] else ""), foreground=s["color"])
+        self.status_detail.config(text=f"{s['status'].title()} · " + (f"Telemetry age: {max(0,int(age))}s" if age is not None else "No telemetry") + (" | LAST KNOWN READINGS" if self.data is not None and not s["fresh"] else ""), foreground=s["color"])
         self.soc_label.config(foreground=s["color"])
         self.primary_runtime.config(text=s["runtime"])
+        self.progress.configure(style="Battery.Horizontal.TProgressbar")
+        ttk.Style(self.root).configure("Battery.Horizontal.TProgressbar",background=s["color"])
         self.reserve_runtime.config(text=f"Until {NINA_CRITICAL_SOC}% SOC reserve: {s['reserve']}")
         if not s["fresh"]:
             self.connection_label.config(text="Disconnected / waiting for fresh telemetry")
@@ -1876,19 +1909,20 @@ class WattCycleMonitor:
             w = self.warning
             fields = ("status_register_1","status_register_2","status_register_3","status_register_5","battery_mode","warning_register_1","warning_register_2","charge_current_state","discharge_current_state")
             self.raw_power_label.config(text="BMS: " + " | ".join(f"{k}={getattr(w,k,None)}" for k in fields))
+            self.discharge_state.config(text="Enabled" if self.discharge_on else "Disabled", foreground="#22a66a" if self.discharge_on else self.display.colors[3])
             flags = protection_flags(w)
             self.protection_label.config(text="Reported protections / faults: " + ("; ".join(flags) if flags else "None"), foreground="#e5a323" if flags else self.display.colors[2])
             self.warning_value.config(text="ACTIVE" if flags or w.warning_register_1 or w.warning_register_2 else "None")
-            self.charge_state.config(text="Protection active / MOS off" if charging_protection(w) and not self.charge_on else ("MOS enabled" if self.charge_on else "MOS disabled"))
+            self.charge_state.config(text="Protected · Off" if charging_protection(w) and not self.charge_on else ("Enabled" if self.charge_on else "Disabled"), foreground="#e5a323" if charging_protection(w) and not self.charge_on else ("#22a66a" if self.charge_on else self.display.colors[3]))
         else:
             self.raw_power_label.config(text="BMS status missing or stale")
             self.protection_label.config(text="Protection status unknown", foreground=self.display.colors[3])
             self.warning_value.config(text="Unknown")
-            self.charge_state.config(text="Unknown")
-            self.discharge_state.config(text="Unknown")
+            self.charge_state.config(text="Unknown",foreground=self.display.colors[3])
+            self.discharge_state.config(text="Unknown",foreground=self.display.colors[3])
         d = self.data
         activity = "Unknown" if not s["fresh"] or d is None else f"{d.current:+.2f} A — " + ("Charging" if d.current > .1 else "Discharging" if d.current < -.1 else "Idle")
-        self.activity_label.config(text="Measured activity: " + activity)
+        self.activity_label.config(text="Battery activity: " + activity)
         self.trace_label.config(text=self.power_trace[:180])
         allowed = warning_fresh and MOS_CONTROL_ENABLED and not self.control_busy and self.unverified_control is None
         for button in (self.charge_button,self.charge_off_button,self.discharge_button,self.discharge_off_button):
