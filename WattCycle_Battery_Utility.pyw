@@ -1533,13 +1533,13 @@ class WattCycleMonitor:
                                 self.charge_on = bool(last_raw & CHARGE_BIT)
                                 self.discharge_on = bool(last_raw & DISCHARGE_BIT)
                                 actual = self.charge_on if control == "charge" else self.discharge_on
-                                if control == 'discharge' and actual == desired:
+                                if actual == desired:
                                     self.control_message = f"{name} {'enabled' if desired else 'disabled'} — verified by BMS"
                                     self.unverified_control = None
                                     verified = True
                                     break
                             if not verified:
-                                self.control_message = (f"{name}: BMS reports protection; switch state unconfirmed" if control == "charge" and charging_protection(self.warning) else f"{name}: confirmation pending (register {before_raw!r} → {last_raw!r}; response {response!r})")
+                                self.control_message = (f"{name}: BMS reports protection; switch state unconfirmed" if control == "charge" and desired and charging_protection(self.warning) else f"{name}: confirmation pending (register {before_raw!r} → {last_raw!r}; response {response!r})")
                         except Exception as e:
                             self.control_message = f"{name}: command or verification error: {type(e).__name__}: {e}"
                         finally:
@@ -1582,11 +1582,11 @@ class WattCycleMonitor:
                         control, desired, expires = self.unverified_control
                         name = "Charging input" if control == "charge" else "Battery output"
                         actual = self.charge_on if control == "charge" else self.discharge_on
-                        if control == 'discharge' and warning is not None and actual == desired and time.monotonic() < expires:
+                        if warning is not None and actual == desired and time.monotonic() < expires:
                             self.control_message = f"{name} {'enabled' if desired else 'disabled'} — verified by BMS (delayed)"
                             self.unverified_control = None
                         elif time.monotonic() >= expires:
-                            self.control_message = (f"{name}: unconfirmed; reported protection may inhibit charging" if control == "charge" and charging_protection(warning) else f"{name}: requested state not confirmed by BMS (see diagnostics)")
+                            self.control_message = (f"{name}: effective state inhibited by reported protection; manual setting unconfirmed" if control == "charge" and desired and charging_protection(warning) else f"{name}: requested state not confirmed by BMS (see diagnostics)")
                             self.unverified_control = None
 
                     await asyncio.sleep(
@@ -1879,7 +1879,7 @@ class WattCycleMonitor:
             flags = protection_flags(w)
             self.protection_label.config(text="Reported protections / faults: " + ("; ".join(flags) if flags else "None"), foreground="#e5a323" if flags else self.display.colors[2])
             self.warning_value.config(text="ACTIVE" if flags or w.warning_register_1 or w.warning_register_2 else "None")
-            self.charge_state.config(text="Protection active" if charging_protection(w) else "Unconfirmed (bit " + ("set)" if self.charge_on else "clear)"))
+            self.charge_state.config(text="Protection active / MOS off" if charging_protection(w) and not self.charge_on else ("MOS enabled" if self.charge_on else "MOS disabled"))
         else:
             self.raw_power_label.config(text="BMS status missing or stale")
             self.protection_label.config(text="Protection status unknown", foreground=self.display.colors[3])
