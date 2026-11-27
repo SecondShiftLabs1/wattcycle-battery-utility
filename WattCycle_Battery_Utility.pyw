@@ -14,6 +14,7 @@ from tkinter import ttk, messagebox, simpledialog
 from datetime import timedelta
 from wattcycle_ble import WattcycleClient
 from wattcycle_config import load_config, save_config
+from wattcycle_display import Display, snapshot
 
 CONFIG = load_config()
 ADDRESS = CONFIG.get("battery_address", "")
@@ -50,6 +51,29 @@ CHARGE_BIT = 0x02
 DISCHARGE_BIT = 0x04
 
 
+# Flag meanings from qume/wattcycle_ble PROTOCOL.md; firmware may vary.
+PROTECTION_FLAGS = {
+    "status_register_1": ("Cell overcharge", "Cell overdischarge", "Pack overcharge", "Pack overdischarge", "Charge overcurrent", "Discharge overcurrent", "Hardware protection", "Charge voltage high"),
+    "status_register_2": ("Charge high temperature", "Discharge high temperature", "Charge low temperature", "Discharge low temperature", "MOS high temperature", "Environment high temperature", "Environment low temperature"),
+    "status_register_5": ("Cell fault", "Charge MOS fault", "Discharge MOS fault", "Temperature fault"),
+}
+
+def protection_flags(w):
+    if w is None:
+        return []
+    flags = []
+    for field, names in PROTECTION_FLAGS.items():
+        value = int(getattr(w, field, 0) or 0)
+        for bit in range(8):
+            if value & (1 << bit):
+                flags.append(names[bit] if bit < len(names) else f"{field} bit {bit} (undocumented)")
+    return flags
+
+def charging_protection(w):
+    if w is None:
+        return False
+    return bool((w.status_register_1 & 0x95) or (w.status_register_2 & 0x75) or (w.status_register_5 & 0x0b))
+
 class WattCycleMonitor:
 
     def __init__(self, root):
@@ -68,6 +92,9 @@ class WattCycleMonitor:
         self.discharge_on = None
         self.control_busy = False
         self.pending_command = None
+        self.unverified_control = None
+        self.warning_time = None
+        self.power_trace = 'No command sent'
         self.last_external_command_id = None
 
         os.makedirs(DATA_DIR, exist_ok=True)
@@ -127,6 +154,8 @@ class WattCycleMonitor:
 
         self.init_database()
 
+        self.display = Display(self, CONFIG, save_config)
+        self.display.db_path = DB_PATH
         self.build_gui()
 
         self.thread = threading.Thread(
@@ -137,6 +166,8 @@ class WattCycleMonitor:
 
         self.update_gui()
         self.root.protocol("WM_DELETE_WINDOW", self.close)
+        if CONFIG.get("ui_mode") in ("horizontal", "vertical"):
+            self.root.after(100, lambda: self.display.open(CONFIG["ui_mode"]))
 
     def ensure_battery_configured(self):
         global ADDRESS, CONFIG, MOS_CONTROL_ENABLED
@@ -694,60 +725,65 @@ class WattCycleMonitor:
 
     def build_gui(self):
 
-        # Scrollable content keeps every control reachable without requiring
-        # an enormous window as the monitor grows.
-        shell = ttk.Frame(self.root)
+        shell = ttk.Frame(self.root, padding=10)
         shell.pack(fill="both", expand=True)
-        canvas = tk.Canvas(shell, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(shell, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side="right", fill="y")
-        canvas.pack(side="left", fill="both", expand=True)
-
-        main = ttk.Frame(canvas, padding=14)
-        window_id = canvas.create_window((0, 0), window=main, anchor="nw")
-        main.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(window_id, width=e.width))
-        canvas.bind_all("<MouseWheel>", lambda e: canvas.yview_scroll(int(-1 * (e.delta / 120)), "units"))
-
-        ttk.Label(
-            main,
-            text="WATTCYCLE",
-            font=("Segoe UI", 22, "bold")
-        ).pack()
-
-        ttk.Label(
-            main,
-            text="Bluetooth LiFePO4 Battery Monitor",
-            font=("Segoe UI", 11)
-        ).pack(pady=(0, 10))
-
-        self.connection_label = ttk.Label(
-            main,
-            text="Connecting...",
-            font=("Segoe UI", 10)
-        )
-        self.connection_label.pack()
-        ttk.Button(main, text="Settings", command=self.show_settings).pack(pady=(6, 0))
+        header = ttk.Frame(shell)
+        header.pack(fill="x")
+        ttk.Label(header, text="WattCycle Utility", font=("Segoe UI", 19, "bold")).pack(side="left")
+        ttk.Button(header, text="Theme", command=self.display.toggle_theme).pack(side="right", padx=3)
+        ttk.Button(header, text="Vertical slim", command=lambda: self.display.open("vertical")).pack(side="right", padx=3)
+        ttk.Button(header, text="Horizontal slim", command=lambda: self.display.open("horizontal")).pack(side="right", padx=3)
+        self.connection_label = ttk.Label(shell, text="Connecting...")
+        self.connection_label.pack(anchor="w", pady=4)
+        self.alert_status = ttk.Label(shell, text="No active alerts", wraplength=680)
+        self.alert_status.pack(anchor="w")
+        self.status_detail = ttk.Label(shell, text="Waiting for telemetry")
+        self.status_detail.pack(anchor="w", pady=(0,5))
+        tabs = ttk.Notebook(shell)
+        tabs.pack(fill="both", expand=True)
+        def page(name):
+            frame = ttk.Frame(tabs, padding=10)
+            tabs.add(frame, text=name)
+            return frame
+        main = page("Overview")
+        diagnostics = page("Diagnostics")
+        history = page("History")
+        automation = page("Automation")
+        settings = page("Settings")
+        self.root.geometry("850x790")
+        self.root.minsize(720, 690)
+        hero = ttk.Frame(main)
+        hero.pack(fill="x")
+        hero.columnconfigure(0, weight=1)
+        hero.columnconfigure(1, weight=1)
+        battery = ttk.Frame(hero)
+        battery.grid(row=0,column=0,sticky="ew")
+        estimate = ttk.Frame(hero)
+        estimate.grid(row=0,column=1,sticky="ew")
+        ttk.Label(estimate,text="Estimated runtime (15 min average)").pack()
+        self.primary_runtime = ttk.Label(estimate,text="--",font=("Segoe UI",28,"bold"))
+        self.primary_runtime.pack()
+        self.reserve_runtime = ttk.Label(estimate,text="Until SOC reserve: --")
+        self.reserve_runtime.pack()
 
         self.soc_label = ttk.Label(
-            main,
+            battery,
             text="--%",
             font=("Segoe UI", 52, "bold")
         )
         self.soc_label.pack(pady=(8, 0))
 
         self.capacity_label = ttk.Label(
-            main,
+            battery,
             text="-- Ah remaining",
             font=("Segoe UI", 11)
         )
         self.capacity_label.pack()
 
         self.progress = ttk.Progressbar(
-            main,
+            battery,
             maximum=100,
-            length=520
+            length=250
         )
         self.progress.pack(pady=10)
 
@@ -790,9 +826,11 @@ class WattCycleMonitor:
         self.avg15_value = self.make_readout(averages, "15 Min Avg", 1)
         self.avg_runtime_value = self.make_readout(averages, "Est. Runtime", 2)
 
+        self.display.build_graph(main)
+
         # Automatic session summary
         session = ttk.LabelFrame(
-            main,
+            history,
             text=" Discharge Session ",
             padding=10
         )
@@ -818,7 +856,7 @@ class WattCycleMonitor:
 
         # Cells
         cells = ttk.LabelFrame(
-            main,
+            diagnostics,
             text=" Cell Voltages ",
             padding=12
         )
@@ -858,7 +896,7 @@ class WattCycleMonitor:
 
         # Temperatures
         temperatures = ttk.LabelFrame(
-            main,
+            diagnostics,
             text=" Temperatures ",
             padding=12
         )
@@ -879,7 +917,7 @@ class WattCycleMonitor:
 
         # BMS information
         bms = ttk.LabelFrame(
-            main,
+            diagnostics,
             text=" BMS Status ",
             padding=12
         )
@@ -895,13 +933,16 @@ class WattCycleMonitor:
             bms, "Balancing", 1
         )
         self.warning_value = self.make_readout(
-            bms, "Warnings", 2
+            bms, "Warnings / protection", 2
         )
+
+        self.protection_label = ttk.Label(bms, text="Protection status unknown", wraplength=650)
+        self.protection_label.grid(row=1,column=0,columnspan=3,sticky="w",pady=(6,0))
 
         # MOS control
         controls = ttk.LabelFrame(
-            main,
-            text=" BMS Control ",
+            diagnostics,
+            text=" Battery Power Controls ",
             padding=12
         )
         controls.pack(fill="x", pady=6)
@@ -920,7 +961,7 @@ class WattCycleMonitor:
 
         ttk.Label(
             charge,
-            text="Charge MOS",
+            text="Charging Input",
             font=("Segoe UI", 10)
         ).pack()
 
@@ -933,10 +974,12 @@ class WattCycleMonitor:
 
         self.charge_button = ttk.Button(
             charge,
-            text="...",
-            command=self.toggle_charge
+            text="Enable charging",
+            command=lambda: self.request_power("charge", True)
         )
-        self.charge_button.pack()
+        self.charge_button.pack(side="left", padx=2)
+        self.charge_off_button = ttk.Button(charge, text="Disable charging", command=lambda: self.request_power("charge", False))
+        self.charge_off_button.pack(side="left", padx=2)
 
         # Discharge
         discharge = ttk.Frame(controls)
@@ -949,7 +992,7 @@ class WattCycleMonitor:
 
         ttk.Label(
             discharge,
-            text="Discharge MOS",
+            text="Battery Output",
             font=("Segoe UI", 10)
         ).pack()
 
@@ -962,10 +1005,12 @@ class WattCycleMonitor:
 
         self.discharge_button = ttk.Button(
             discharge,
-            text="...",
-            command=self.toggle_discharge
+            text="Enable output",
+            command=lambda: self.request_power("discharge", True)
         )
-        self.discharge_button.pack()
+        self.discharge_button.pack(side="left", padx=2)
+        self.discharge_off_button = ttk.Button(discharge, text="Disable output", command=lambda: self.request_power("discharge", False))
+        self.discharge_off_button.pack(side="left", padx=2)
 
         if not MOS_CONTROL_ENABLED:
             self.charge_button.config(state="disabled")
@@ -983,16 +1028,18 @@ class WattCycleMonitor:
             pady=(10, 0)
         )
 
-        alert_frame = ttk.LabelFrame(main, text=" Alerts ", padding=8)
-        alert_frame.pack(fill="x", pady=6)
-        self.alert_status = ttk.Label(
-            alert_frame, text="No active alerts", font=("Segoe UI", 9)
-        )
-        self.alert_status.pack(anchor="w")
+        self.raw_power_label = ttk.Label(controls, text="Waiting for fresh BMS status", wraplength=650)
+        self.raw_power_label.grid(row=2,column=0,columnspan=2,sticky="w")
+        self.activity_label = ttk.Label(controls, text="Measured activity: unknown", wraplength=650)
+        self.activity_label.grid(row=3,column=0,columnspan=2,sticky="w")
+        self.trace_label = ttk.Label(controls, text="", wraplength=650)
+        self.trace_label.grid(row=4,column=0,columnspan=2,sticky="w")
+        ttk.Button(controls,text="Copy diagnostics",command=self.copy_power_diagnostics).grid(row=5,column=0,columnspan=2)
+        self.control_status.configure(wraplength=650)
 
         # N.I.N.A. integration. The monitor publishes NORMAL/LOW/CRITICAL/
         # EMERGENCY to a JSON state file for the N.I.N.A. safety bridge.
-        nina = ttk.LabelFrame(main, text=" N.I.N.A. Integration ", padding=10)
+        nina = ttk.LabelFrame(automation, text=" N.I.N.A. Integration ", padding=10)
         nina.pack(fill="x", pady=6)
         for i in range(4):
             nina.columnconfigure(i, weight=1)
@@ -1019,8 +1066,12 @@ class WattCycleMonitor:
             font=("Segoe UI", 8)
         ).grid(row=3, column=0, columnspan=4, sticky="w", pady=(7, 0))
 
+        ttk.Label(settings, text="Application preferences", font=("Segoe UI",16,"bold")).pack(anchor="w")
+        ttk.Button(settings, text="Telemetry, protection and logging settings", command=self.show_settings).pack(anchor="w", pady=8)
+        ttk.Button(settings, text="Switch dark/light theme", command=self.display.toggle_theme).pack(anchor="w", pady=4)
+        ttk.Label(settings, text="Slim display preferences are available from its right-click menu.", wraplength=620).pack(anchor="w", pady=8)
         self.footer = ttk.Label(
-            main,
+            shell,
             text="Waiting for battery...",
             font=("Segoe UI", 8)
         )
@@ -1067,7 +1118,7 @@ class WattCycleMonitor:
         form.columnconfigure(0, weight=1)
 
         mos_var = tk.BooleanVar(value=MOS_CONTROL_ENABLED)
-        ttk.Checkbutton(outer, text="Enable Charge/Discharge MOS controls", variable=mos_var).pack(anchor="w", pady=(14, 2))
+        ttk.Checkbutton(outer, text="Allow battery power control", variable=mos_var).pack(anchor="w", pady=(14, 2))
         ttk.Label(
             outer,
             text="MOS control can disable charging or battery output. Keep this off unless you intentionally need BMS switching.",
@@ -1335,76 +1386,27 @@ class WattCycleMonitor:
     # BUTTONS
     # ---------------------------------------------------------
 
-    def toggle_charge(self):
-        if not MOS_CONTROL_ENABLED:
-            self.control_status.config(text="MOS control is disabled in Settings.")
+    def copy_power_diagnostics(self):
+        self.root.clipboard_clear()
+        self.root.clipboard_append("\n".join((self.raw_power_label.cget("text"), self.protection_label.cget("text"), self.activity_label.cget("text"), self.power_trace, str(getattr(self, "control_message", "")))))
+
+    def request_power(self, control, desired):
+        if not MOS_CONTROL_ENABLED or not self.connected or self.control_busy or self.unverified_control is not None:
             return
-        if self.control_busy or self.charge_on is None or not self.connected:
+        if self.warning_time is None or time.monotonic()-self.warning_time > float(CONFIG.get("stale_seconds",30)):
+            self.control_message = "Fresh BMS status required before changing power"
             return
-
-        if self.charge_on:
-
-            if not messagebox.askyesno(
-                "Disable Charging",
-                "Turn OFF the Charge MOS?\n\n"
-                "The battery will no longer accept charge "
-                "until it is turned back on."
-            ):
-                return
-
-            self.pending_command = (
-                "charge",
-                False,
-                CHARGE_OFF
-            )
-
-        else:
-            self.pending_command = (
-                "charge",
-                True,
-                CHARGE_ON
-            )
-
+        name = "charging input" if control == "charge" else "battery output"
+        if not messagebox.askyesno("Confirm battery power command",
+            f"{'Enable' if desired else 'Disable'} {name}?\n\n"
+            "Switch interpretation is under investigation. Disabling output can immediately shut down connected equipment."):
+            return
+        if not MOS_CONTROL_ENABLED or not self.connected or self.control_busy or self.unverified_control is not None:
+            return
+        command = {( "charge", True):CHARGE_ON, ("charge",False):CHARGE_OFF, ("discharge",True):DISCHARGE_ON, ("discharge",False):DISCHARGE_OFF}[control,desired]
         self.control_busy = True
-        self.control_status.config(
-            text="Sending command..."
-        )
-
-    def toggle_discharge(self):
-        if not MOS_CONTROL_ENABLED:
-            self.control_status.config(text="MOS control is disabled in Settings.")
-            return
-        if self.control_busy or self.discharge_on is None or not self.connected:
-            return
-
-        if self.discharge_on:
-
-            if not messagebox.askyesno(
-                "Disable Battery Output",
-                "Turn OFF the Discharge MOS?\n\n"
-                "This will remove battery output power.\n\n"
-                "Any equipment powered by this battery "
-                "may shut down immediately."
-            ):
-                return
-
-            self.pending_command = (
-                "discharge",
-                False,
-                DISCHARGE_OFF
-            )
-
-        else:
-            self.pending_command = (
-                "discharge",
-                True,
-                DISCHARGE_ON
-            )
-
-        self.control_busy = True
-        self.control_status.config(
-            text="Sending command..."
-        )
+        self.pending_command = (control, desired, command)
+        self.control_message = f"Requested {name}: {'enable' if desired else 'disable'}"
 
     # ---------------------------------------------------------
     # BLE
@@ -1443,7 +1445,7 @@ class WattCycleMonitor:
                     # Accept local commands from the N.I.N.A. Alpaca bridge.
                     # The bridge never opens its own BLE connection; this monitor
                     # remains the single owner of BMS communications.
-                    if self.pending_command is None and not self.control_busy:
+                    if self.pending_command is None and not self.control_busy and self.unverified_control is None:
                         try:
                             if os.path.exists(NINA_COMMAND_PATH):
                                 with open(NINA_COMMAND_PATH, "r", encoding="utf-8") as f:
@@ -1472,45 +1474,74 @@ class WattCycleMonitor:
                     # Process GUI/N.I.N.A. command
                     if self.pending_command is not None and not MOS_CONTROL_ENABLED:
                         self.pending_command = None
-                        self.control_message = "MOS control blocked by config.json"
+                        self.control_message = "Battery power control blocked by settings"
+                        self.control_busy = False
 
                     if self.pending_command is not None:
                         control, desired, command = self.pending_command
                         self.pending_command = None
+                        self.unverified_control = None
+                        name = 'Charging input' if control == 'charge' else 'Battery output'
+                        self.control_message = f'{name}: waiting for BMS confirmation...'
                         try:
                             # Refresh state immediately before a write. GUI state may
                             # be several seconds old by the time the user clicks.
                             before = await client.read_warning_info()
+                            if before is None:
+                                self.control_message = 'No fresh BMS status; command not sent'
+                                continue
                             if before is not None:
+                                self.warning_time = time.monotonic()
                                 self.warning = before
                                 self.charge_on = bool(before.status_register_3 & CHARGE_BIT)
                                 self.discharge_on = bool(before.status_register_3 & DISCHARGE_BIT)
                                 actual_before = self.charge_on if control == "charge" else self.discharge_on
-                                if actual_before == desired:
+                                if control == 'discharge' and actual_before == desired:
                                     self.control_message = f"{control.title()} MOS already {'ON' if desired else 'OFF'} — no command sent"
                                     continue
 
-                            await client.send_command(command, timeout=3)
-                            await asyncio.sleep(1)
-                            verify = await client.read_warning_info()
-                            if verify is None:
-                                self.control_message = "MOS command sent, but BMS state could not be verified"
-                            else:
+                            # Send once, then reconcile delayed status without resending.
+                            self.unverified_control = (control, desired, time.monotonic() + 60)
+                            before_raw = before.status_register_3 if before is not None else None
+                            self.control_message = f"{name}: sending command..."
+                            self.power_trace = f'{name}: requested {desired}; TX {command.hex(" ")}; before register3={before_raw!r}'
+                            if not MOS_CONTROL_ENABLED:
+                                self.unverified_control = None
+                                self.control_message = 'Power control disabled; command not sent'
+                                continue
+                            response = await client.send_command(command, timeout=3)
+                            self.power_trace += f'; RX {response.hex(" ") if isinstance(response, bytes) else repr(response)}'
+                            self.control_message = f"{name}: waiting for BMS status..."
+                            deadline = time.monotonic() + 10
+                            verified = False
+                            last_raw = None
+                            while self.running and client.is_connected and time.monotonic() < deadline:
+                                await asyncio.sleep(1)
+                                remaining = deadline - time.monotonic()
+                                if remaining <= 0:
+                                    break
+                                try:
+                                    verify = await asyncio.wait_for(client.read_warning_info(), timeout=remaining)
+                                except asyncio.TimeoutError:
+                                    break
+                                if verify is None:
+                                    continue
                                 self.warning = verify
-                                self.charge_on = bool(verify.status_register_3 & CHARGE_BIT)
-                                self.discharge_on = bool(verify.status_register_3 & DISCHARGE_BIT)
+                                self.warning_time = time.monotonic()
+                                last_raw = verify.status_register_3
+                                self.power_trace += f'; register3={last_raw}'
+                                self.charge_on = bool(last_raw & CHARGE_BIT)
+                                self.discharge_on = bool(last_raw & DISCHARGE_BIT)
                                 actual = self.charge_on if control == "charge" else self.discharge_on
                                 if actual == desired:
-                                    self.control_message = (
-                                        f"{control.title()} MOS {'ON' if desired else 'OFF'} — verified by BMS"
-                                    )
-                                else:
-                                    self.control_message = (
-                                        f"{control.title()} MOS command did not verify; BMS still reports "
-                                        f"{'ON' if actual else 'OFF'}"
-                                    )
+                                    self.control_message = f"{name} {'enabled' if desired else 'disabled'} — verified by BMS"
+                                    self.unverified_control = None
+                                    verified = True
+                                    break
+                            if not verified:
+                                self.control_message = (f"{name}: BMS reports protection; switch state unconfirmed" if control == "charge" and desired and charging_protection(self.warning) else f"{name}: confirmation pending (register {before_raw!r} → {last_raw!r}; response {response!r})")
                         except Exception as e:
-                            self.control_message = f"{control.title()} MOS command failed: {e}"
+                            self.control_message = f"{name}: command or verification error: {type(e).__name__}: {e}"
                         finally:
                             self.control_busy = False
 
@@ -1534,6 +1565,7 @@ class WattCycleMonitor:
                         self.publish_nina_state(data)
 
                     if warning is not None:
+                        self.warning_time = time.monotonic()
                         self.warning = warning
 
                         self.charge_on = bool(
@@ -1545,6 +1577,17 @@ class WattCycleMonitor:
                             warning.status_register_3
                             & DISCHARGE_BIT
                         )
+
+                    if self.unverified_control is not None:
+                        control, desired, expires = self.unverified_control
+                        name = "Charging input" if control == "charge" else "Battery output"
+                        actual = self.charge_on if control == "charge" else self.discharge_on
+                        if warning is not None and actual == desired and time.monotonic() < expires:
+                            self.control_message = f"{name} {'enabled' if desired else 'disabled'} — verified by BMS (delayed)"
+                            self.unverified_control = None
+                        elif time.monotonic() >= expires:
+                            self.control_message = (f"{name}: effective state inhibited by reported protection; manual setting unconfirmed" if control == "charge" and desired and charging_protection(warning) else f"{name}: requested state not confirmed by BMS (see diagnostics)")
+                            self.unverified_control = None
 
                     await asyncio.sleep(
                         REFRESH_SECONDS
@@ -1779,40 +1822,10 @@ class WattCycleMonitor:
 
             # Verified MOS states
             if self.charge_on is not None:
-
-                self.charge_state.config(
-                    text=(
-                        "ON"
-                        if self.charge_on
-                        else "OFF"
-                    )
-                )
-
-                self.charge_button.config(
-                    text=(
-                        "Turn OFF"
-                        if self.charge_on
-                        else "Turn ON"
-                    )
-                )
+                self.charge_state.config(text=("Reported enabled" if self.charge_on else "Reported disabled"))
 
             if self.discharge_on is not None:
-
-                self.discharge_state.config(
-                    text=(
-                        "ON"
-                        if self.discharge_on
-                        else "OFF"
-                    )
-                )
-
-                self.discharge_button.config(
-                    text=(
-                        "Turn OFF"
-                        if self.discharge_on
-                        else "Turn ON"
-                    )
-                )
+                self.discharge_state.config(text=("Reported enabled" if self.discharge_on else "Reported disabled"))
 
             if hasattr(self, "control_message"):
                 self.control_status.config(
@@ -1850,10 +1863,38 @@ class WattCycleMonitor:
                 )
             )
 
-        self.root.after(
-            500,
-            self.update_gui
-        )
+        s = snapshot(self, CONFIG)
+        age = s["age"]
+        self.status_detail.config(text=f"{s['status']} | " + (f"Telemetry age: {max(0,int(age))}s" if age is not None else "No telemetry") + (" | LAST KNOWN READINGS" if self.data is not None and not s["fresh"] else ""), foreground=s["color"])
+        self.soc_label.config(foreground=s["color"])
+        self.primary_runtime.config(text=s["runtime"])
+        self.reserve_runtime.config(text=f"Until {NINA_CRITICAL_SOC}% SOC reserve: {s['reserve']}")
+        if not s["fresh"]:
+            self.connection_label.config(text="Disconnected / waiting for fresh telemetry")
+        warning_fresh = self.warning_time is not None and time.monotonic()-self.warning_time <= float(CONFIG.get("stale_seconds",30)) and s["fresh"]
+        if warning_fresh and self.warning is not None:
+            w = self.warning
+            fields = ("status_register_1","status_register_2","status_register_3","status_register_5","battery_mode","warning_register_1","warning_register_2","charge_current_state","discharge_current_state")
+            self.raw_power_label.config(text="BMS: " + " | ".join(f"{k}={getattr(w,k,None)}" for k in fields))
+            flags = protection_flags(w)
+            self.protection_label.config(text="Reported protections / faults: " + ("; ".join(flags) if flags else "None"), foreground="#e5a323" if flags else self.display.colors[2])
+            self.warning_value.config(text="ACTIVE" if flags or w.warning_register_1 or w.warning_register_2 else "None")
+            self.charge_state.config(text="Protection active / MOS off" if charging_protection(w) and not self.charge_on else ("MOS enabled" if self.charge_on else "MOS disabled"))
+        else:
+            self.raw_power_label.config(text="BMS status missing or stale")
+            self.protection_label.config(text="Protection status unknown", foreground=self.display.colors[3])
+            self.warning_value.config(text="Unknown")
+            self.charge_state.config(text="Unknown")
+            self.discharge_state.config(text="Unknown")
+        d = self.data
+        activity = "Unknown" if not s["fresh"] or d is None else f"{d.current:+.2f} A — " + ("Charging" if d.current > .1 else "Discharging" if d.current < -.1 else "Idle")
+        self.activity_label.config(text="Measured activity: " + activity)
+        self.trace_label.config(text=self.power_trace[:180])
+        allowed = warning_fresh and MOS_CONTROL_ENABLED and not self.control_busy and self.unverified_control is None
+        for button in (self.charge_button,self.charge_off_button,self.discharge_button,self.discharge_off_button):
+            button.config(state="normal" if allowed else "disabled")
+        self.display.update()
+        self.root.after(500, self.update_gui)
 
     @staticmethod
     def temp_string(celsius):
@@ -1861,6 +1902,9 @@ class WattCycleMonitor:
         return f"{fahrenheit:.1f}°F"
 
     def close(self):
+        if hasattr(self, 'display'):
+            self.display.remember()
+            self.display.persist()
         self.running = False
         # Preserve a real active session if the monitor is closed before the
         # normal five-minute idle timeout can finalize it.
