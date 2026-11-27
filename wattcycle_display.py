@@ -8,16 +8,29 @@ def palette(root, dark):
     bg, panel, fg, muted = ("#101722", "#1b2635", "#e6edf6", "#a0aec0") if dark else ("#eef2f6", "#ffffff", "#172334", "#526174")
     style = ttk.Style(root)
     style.theme_use("clam")
-    style.configure(".", background=bg, foreground=fg, fieldbackground=panel, font=("Segoe UI", 10))
+    border = "#344256" if dark else "#cbd5e1"
+    hover = "#30435a" if dark else "#dbeafe"
+    accent = "#4da3ff" if dark else "#1766bb"
+    style.configure(".", background=bg, foreground=fg, fieldbackground=panel,
+                    bordercolor=border, lightcolor=border, darkcolor=border,
+                    font=("Segoe UI", 10))
     for name in ("TFrame", "TLabel", "TLabelframe", "TLabelframe.Label", "TNotebook", "TNotebook.Tab", "TCheckbutton", "TRadiobutton"):
         style.configure(name, background=bg, foreground=fg)
-    style.configure("TButton", background=panel, foreground=fg, padding=5)
-    style.map("TButton", background=[("active", "#526174")], foreground=[("disabled", muted)])
-    style.configure("TNotebook.Tab", padding=(12, 7))
-    style.map("TNotebook.Tab", background=[("selected", panel)])
-    style.configure("Treeview", background=panel, fieldbackground=panel, foreground=fg)
-    style.configure("Treeview.Heading", background=bg, foreground=fg)
-    style.configure("Horizontal.TProgressbar", background="#22a66a", troughcolor=panel)
+    style.configure("Muted.TLabel", foreground=muted)
+    style.configure("Card.TFrame", background=panel)
+    style.configure("Card.TLabel", background=panel, foreground=fg)
+    style.configure("CardMuted.TLabel", background=panel, foreground=muted)
+    style.configure("TLabelframe", borderwidth=1, relief="solid")
+    style.configure("TLabelframe.Label", foreground=muted, font=("Segoe UI",10,"bold"))
+    style.configure("TButton", background=panel, foreground=fg, padding=(10,6), borderwidth=1, relief="flat")
+    style.map("TButton", background=[("pressed",hover),("active",hover)], foreground=[("disabled", muted)])
+    style.configure("TNotebook", borderwidth=0, tabmargins=(0,4,0,0))
+    style.configure("TNotebook.Tab", padding=(16,9), borderwidth=0)
+    style.map("TNotebook.Tab", background=[("selected",panel),("active",hover)], foreground=[("selected",accent)])
+    style.configure("Treeview", background=panel, fieldbackground=panel, foreground=fg, rowheight=28)
+    style.configure("Treeview.Heading", background=bg, foreground=muted, padding=(5,6))
+    style.configure("Horizontal.TProgressbar", background="#22a66a", troughcolor=bg, borderwidth=0, thickness=9)
+    style.configure("Battery.Horizontal.TProgressbar", background="#22a66a", troughcolor=bg, borderwidth=0, thickness=9)
     root.configure(bg=bg)
     return bg, panel, fg, muted
 
