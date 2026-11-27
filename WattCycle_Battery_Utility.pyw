@@ -15,6 +15,7 @@ from datetime import timedelta
 from wattcycle_ble import WattcycleClient
 from wattcycle_config import load_config, save_config
 from wattcycle_display import Display, snapshot
+from wattcycle_modern import ModernOverview, ModernNavigation
 
 CONFIG = load_config()
 ADDRESS = CONFIG.get("battery_address", "")
@@ -734,99 +735,25 @@ class WattCycleMonitor:
         ttk.Button(header, text="Vertical slim", command=lambda: self.display.open("vertical")).pack(side="right", padx=3)
         ttk.Button(header, text="Horizontal slim", command=lambda: self.display.open("horizontal")).pack(side="right", padx=3)
         self.connection_label = ttk.Label(shell, text="Connecting...")
-        self.connection_label.pack(anchor="w", pady=(6,0))
+        # Connection state is shown in the unified status line.
         self.alert_status = ttk.Label(shell, text="No active alerts", wraplength=680)
-        self.alert_status.pack(anchor="w", pady=(2,0))
+        # Alert information is combined into the overview status line.
         self.status_detail = ttk.Label(shell, text="Waiting for telemetry")
-        self.status_detail.pack(anchor="w", pady=(0,10))
-        tabs = ttk.Notebook(shell)
+        self.status_detail.pack(anchor="w", pady=(0,8))
+        tabs = ModernNavigation(shell, self.display.dark)
         tabs.pack(fill="both", expand=True)
+        self.modern_navigation = tabs
         def page(name):
-            frame = ttk.Frame(tabs, padding=10)
-            tabs.add(frame, text=name)
-            return frame
+            return tabs.add(name)
         main = page("Overview")
         diagnostics = page("Battery")
         history = page("History")
         automation = page("Automation")
         settings = page("Settings")
-        self.root.geometry("850x720")
-        self.root.minsize(740, 620)
-        hero = ttk.Frame(main)
-        hero.pack(fill="x")
-        hero.columnconfigure(0, weight=1)
-        hero.columnconfigure(1, weight=1)
-        battery = ttk.Frame(hero, style="Card.TFrame", padding=12)
-        battery.grid(row=0,column=0,sticky="nsew",padx=(0,5))
-        estimate = ttk.Frame(hero, style="Card.TFrame", padding=12)
-        estimate.grid(row=0,column=1,sticky="nsew",padx=(5,0))
-        ttk.Label(estimate,text="Estimated runtime · 15 min average",style="CardMuted.TLabel").pack(pady=(12,4))
-        self.primary_runtime = ttk.Label(estimate,text="--",font=("Segoe UI",28,"bold"),style="Card.TLabel")
-        self.primary_runtime.pack()
-        self.reserve_runtime = ttk.Label(estimate,text="Until SOC reserve: --",style="CardMuted.TLabel")
-        self.reserve_runtime.pack()
-
-        self.soc_label = ttk.Label(
-            battery,
-            text="--%",
-            style="Card.TLabel", font=("Segoe UI", 44, "bold")
-        )
-        self.soc_label.pack(pady=(8, 0))
-
-        self.capacity_label = ttk.Label(
-            battery,
-            text="-- Ah remaining",
-            style="CardMuted.TLabel", font=("Segoe UI", 11)
-        )
-        self.capacity_label.pack()
-
-        self.progress = ttk.Progressbar(
-            battery,
-            maximum=100,
-            length=250
-        )
-        self.progress.pack(pady=(8,4),fill="x")
-
-        # Electrical
-        electrical = ttk.LabelFrame(
-            main,
-            text=" Electrical ",
-            padding=12
-        )
-        electrical.pack(fill="x", pady=6)
-
-        for i in range(4):
-            electrical.columnconfigure(i, weight=1)
-
-        self.voltage_value = self.make_readout(
-            electrical, "Voltage", 0
-        )
-        self.current_value = self.make_readout(
-            electrical, "Current", 1
-        )
-        self.power_value = self.make_readout(
-            electrical, "Power", 2
-        )
-        self.runtime_value = self.make_readout(
-            electrical, "Runtime", 3
-        )
-
-        # Rolling load history
-        averages = ttk.LabelFrame(
-            main,
-            text=" Load History ",
-            padding=10
-        )
-        averages.pack(fill="x", pady=6)
-
-        for i in range(3):
-            averages.columnconfigure(i, weight=1)
-
-        self.avg5_value = self.make_readout(averages, "5 Min Avg", 0)
-        self.avg15_value = self.make_readout(averages, "15 Min Avg", 1)
-        self.avg_runtime_value = self.make_readout(averages, "Est. Runtime", 2)
-
-        self.display.build_graph(main)
+        self.root.geometry("820x690")
+        self.root.minsize(740, 650)
+        self.modern_overview = ModernOverview(main, self)
+        self.display.build_graph(self.modern_overview.graph_parent)
 
         # Automatic session summary
         session = ttk.LabelFrame(
@@ -1896,11 +1823,11 @@ class WattCycleMonitor:
 
         s = snapshot(self, CONFIG)
         age = s["age"]
-        self.status_detail.config(text=f"{s['status'].title()} · " + (f"Telemetry age: {max(0,int(age))}s" if age is not None else "No telemetry") + (" | LAST KNOWN READINGS" if self.data is not None and not s["fresh"] else ""), foreground=s["color"])
+        self.status_detail.config(text=("Connected · " if s["fresh"] else "Disconnected · ") + f"{s['status'].title()} · " + (f"Telemetry age: {max(0,int(age))}s" if age is not None else "No telemetry") + (" | LAST KNOWN READINGS" if self.data is not None and not s["fresh"] else ""), foreground=s["color"])
         self.soc_label.config(foreground=s["color"])
         self.primary_runtime.config(text=s["runtime"])
-        self.progress.configure(style="Battery.Horizontal.TProgressbar")
-        ttk.Style(self.root).configure("Battery.Horizontal.TProgressbar",background=s["color"])
+        self.modern_overview.refresh(s, self.display.dark, NINA_CRITICAL_SOC)
+        self.modern_navigation.set_theme(self.display.dark)
         self.reserve_runtime.config(text=f"Until {NINA_CRITICAL_SOC}% SOC reserve: {s['reserve']}")
         if not s["fresh"]:
             self.connection_label.config(text="Disconnected / waiting for fresh telemetry")
