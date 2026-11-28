@@ -79,7 +79,7 @@ class WattCycleMonitor:
 
     def __init__(self, root):
         self.root = root
-        self.root.title("WattCycle Battery Utility - Public Alpha")
+        self.root.title("WattCycle Battery Utility - v0.2.0 Beta")
         self.root.geometry("800x780")
         self.root.minsize(720, 620)
 
