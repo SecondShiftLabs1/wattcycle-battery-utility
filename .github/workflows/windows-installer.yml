@@ -1,6 +1,9 @@
 name: Windows installer
 on:
   pull_request:
+  push:
+    branches: [main]
+    paths: ['wattcycle_version.py']
   workflow_dispatch:
     inputs:
       publish:
@@ -44,7 +47,7 @@ jobs:
             dist/installer/WattCycle-Setup.exe
             dist/installer/WattCycle-Setup.exe.sha256
   publish:
-    if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish))
     needs: build
     runs-on: windows-latest
     permissions:
@@ -65,5 +68,7 @@ jobs:
         run: |
           $version = python -c "from wattcycle_version import VERSION; print(VERSION)"
           $tag = "v$version"
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) { throw "Release $tag already exists; increment VERSION before publishing." }
           gh release create $tag packaged/WattCycle.exe packaged/installer/WattCycle-Setup.exe packaged/installer/WattCycle-Setup.exe.sha256 --target "${{ github.sha }}" --title "WattCycle $version" --prerelease --generate-notes
           if ($LASTEXITCODE -ne 0) { throw "Release publication failed" }
