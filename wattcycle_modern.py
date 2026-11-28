@@ -6,15 +6,48 @@ import customtkinter as ctk
 class ModernNavigation(ttk.Frame):
     def __init__(self,parent,dark):
         super().__init__(parent)
+        # Reserve a dedicated navigation row; page requests cannot consume it.
+        self.columnconfigure(0,weight=1)
+        self.rowconfigure(0,weight=1)
+        self.rowconfigure(1,weight=0)
         self.body=ttk.Frame(self)
-        self.body.pack(fill="both",expand=True)
+        self.body.grid(row=0,column=0,sticky="nsew")
+        self.body.columnconfigure(0,weight=1)
+        self.body.rowconfigure(0,weight=1)
         self.nav=ctk.CTkFrame(self,corner_radius=10)
-        self.nav.pack(fill="x",pady=(8,0))
-        self.pages={}; self.buttons={}; self.active=None; self.dark=None
+        self.nav.grid(row=1,column=0,sticky="ew",pady=(8,0))
+        self.pages={}; self.containers={}; self.canvases={}; self.buttons={}; self.active=None; self.dark=None
         self.set_theme(dark)
     def add(self,name):
-        page=ttk.Frame(self.body,padding=4)
+        if name == "Overview":
+            page=ttk.Frame(self.body,padding=4)
+            container=page
+        else:
+            # Keep tall pages usable at small window sizes and high DPI.
+            container=ttk.Frame(self.body)
+            container.columnconfigure(0,weight=1)
+            container.rowconfigure(0,weight=1)
+            canvas=tk.Canvas(container,highlightthickness=0,borderwidth=0,width=1,height=1,
+                             bg="#101722" if self.dark else "#eef2f6")
+            scroll=ttk.Scrollbar(container,orient="vertical",command=canvas.yview)
+            canvas.configure(yscrollcommand=scroll.set)
+            canvas.grid(row=0,column=0,sticky="nsew")
+            scroll.grid(row=0,column=1,sticky="ns")
+            page=ttk.Frame(canvas,padding=4)
+            item=canvas.create_window((0,0),window=page,anchor="nw")
+            page.bind("<Configure>",lambda e,c=canvas:c.configure(scrollregion=c.bbox("all")))
+            canvas.bind("<Configure>",lambda e,c=canvas,i=item:c.itemconfigure(i,width=e.width))
+            self.canvases[name]=canvas
+            def wheel(event,c=canvas):
+                c.yview_scroll(-int(event.delta/120),"units")
+                return "break"
+            # A page-scoped binding supports scrolling over child controls.
+            def bind_wheel(widget):
+                widget.bind("<MouseWheel>",wheel)
+                for child in widget.winfo_children():bind_wheel(child)
+            page.bind("<Map>",lambda e,p=page:bind_wheel(p),add="+")
         self.pages[name]=page
+        self.containers[name]=container
         button=ctk.CTkButton(self.nav,text=name,corner_radius=8,height=36,width=70,command=lambda:self.select(name))
         button.pack(side="left",fill="x",expand=True,padx=3,pady=5)
         self.buttons[name]=button
@@ -22,9 +55,9 @@ class ModernNavigation(ttk.Frame):
         else: self.paint()
         return page
     def select(self,name):
-        if self.active is not None: self.pages[self.active].pack_forget()
+        if self.active is not None: self.containers[self.active].grid_remove()
         self.active=name
-        self.pages[name].pack(fill="both",expand=True)
+        self.containers[name].grid(row=0,column=0,sticky="nsew")
         self.paint()
     def paint(self):
         for name,b in self.buttons.items():
@@ -36,6 +69,8 @@ class ModernNavigation(ttk.Frame):
         self.dark=dark
         ctk.set_appearance_mode("dark" if dark else "light")
         self.nav.configure(fg_color="#1b2635" if dark else "#ffffff")
+        for canvas in self.canvases.values():
+            canvas.configure(bg="#101722" if dark else "#eef2f6")
         self.paint()
 
 class ModernOverview:
