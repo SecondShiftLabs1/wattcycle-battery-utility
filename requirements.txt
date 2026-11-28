@@ -1,2 +1,3 @@
 wattcycle_ble @ git+https://github.com/qume/wattcycle_ble.git
 bleak
+customtkinter>=5.2.2,<6

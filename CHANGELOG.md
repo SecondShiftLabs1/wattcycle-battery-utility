@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.2.0-beta - 2026-11-27
+
+- Promoted the hardware-tested utility to public beta.
+- Introduced modern CustomTkinter dashboard, adaptive charge/discharge estimates, SOC gauge, fixed bottom navigation and scrollable detail pages.
+- Added explicit charging and output controls, delayed BMS confirmation, protection and fault decoding, and advanced troubleshooting in Settings.
+- Preserved original hardware-tested command bytes and status masks.
 
 - Added tabbed dashboard, dark/light themes, horizontal and vertical slim overlays, live telemetry charts and SOC reserve estimate.
 - Added persistent display preferences, drag/snap, opacity and stale telemetry indicators.
