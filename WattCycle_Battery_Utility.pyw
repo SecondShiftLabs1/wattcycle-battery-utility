@@ -16,6 +16,8 @@ from wattcycle_ble import WattcycleClient
 from wattcycle_config import load_config, save_config
 from wattcycle_display import Display, snapshot
 from wattcycle_modern import ModernOverview, ModernNavigation
+from wattcycle_energy import EventLog
+from wattcycle_core_pages import CorePages
 
 CONFIG = load_config()
 ADDRESS = CONFIG.get("battery_address", "")
@@ -154,6 +156,10 @@ class WattCycleMonitor:
             return
 
         self.init_database()
+        try:
+            self.protection_events = EventLog(DB_PATH)
+        except sqlite3.Error:
+            self.protection_events = None
 
         self.display = Display(self, CONFIG, save_config)
         self.display.db_path = DB_PATH
@@ -613,39 +619,29 @@ class WattCycleMonitor:
         self.windows_notification(title, message)
 
     def check_alerts(self, d, w):
-        # Re-arm SOC thresholds after charging back above them.
-        for threshold in (20, 10, 5):
+        # Routine warnings are passive; critical notifications are edge-triggered.
+        thresholds = sorted({int(NINA_CRITICAL_SOC),int(NINA_EMERGENCY_SOC)})
+        for threshold in thresholds:
             if d.soc > threshold + 2:
                 self.alerted_soc.discard(threshold)
-
-        # If several thresholds are crossed between polls, only fire the most
-        # urgent one and mark the higher thresholds handled too.
-        crossed = [t for t in (20, 10, 5) if d.soc <= t and t not in self.alerted_soc]
+        crossed = [t for t in thresholds if d.soc <= t and t not in self.alerted_soc]
         if crossed:
-            threshold = min(crossed)
-            self.alerted_soc.update(t for t in (20, 10, 5) if d.soc <= t)
-            if threshold <= 5:
-                level = "EMERGENCY BATTERY"
-            elif threshold <= 10:
-                level = "CRITICAL BATTERY"
-            else:
-                level = "LOW BATTERY"
-            self.fire_alert(
-                f"WattCycle - {level}",
-                f"Battery is at {d.soc}% ({d.remaining_capacity:.1f} Ah remaining)."
-            )
-
-        warning_active = bool(
-            w and (w.warning_register_1 != 0 or w.warning_register_2 != 0)
-        )
-        if warning_active and not self.bms_warning_alerted:
-            self.bms_warning_alerted = True
-            self.fire_alert(
-                "WattCycle - BMS Warning",
-                f"BMS warning active: W1={w.warning_register_1}, W2={w.warning_register_2}."
-            )
-        elif not warning_active:
-            self.bms_warning_alerted = False
+            self.alerted_soc.update(t for t in thresholds if d.soc <= t)
+            self.fire_alert("WattCycle - Critical battery", f"Battery is at {d.soc}% ({d.remaining_capacity:.1f} Ah remaining).")
+        if w is None:
+            return
+        flags = set(protection_flags(w))
+        if self.protection_events is not None:
+            try:
+                self.protection_events.observe(flags,d)
+            except sqlite3.Error:
+                pass
+        severe = flags.intersection({"Cell fault","Charge MOS fault","Discharge MOS fault","Temperature fault","Hardware protection","Cell overdischarge","Pack overdischarge","Discharge overcurrent","Discharge high temperature","MOS high temperature","Charge high temperature","Environment high temperature"})
+        previous = getattr(self,"critical_protection_flags",set())
+        if severe-previous:
+            self.fire_alert("WattCycle - Critical protection", "; ".join(sorted(severe)))
+        self.critical_protection_flags = severe
+        self.last_alert_text = ("Active protections: "+ "; ".join(sorted(flags))) if flags else ("Critical battery" if d.soc <= NINA_CRITICAL_SOC else "No active alerts")
 
     def calculate_nina_state(self, d):
         now = time.time()
@@ -732,8 +728,8 @@ class WattCycleMonitor:
         header.pack(fill="x")
         ttk.Label(header, text="WattCycle Utility", font=("Segoe UI", 19, "bold")).pack(side="left")
         ttk.Button(header, text="Theme", command=self.display.toggle_theme).pack(side="right", padx=3)
-        ttk.Button(header, text="Vertical slim", command=lambda: self.display.open("vertical")).pack(side="right", padx=3)
-        ttk.Button(header, text="Horizontal slim", command=lambda: self.display.open("horizontal")).pack(side="right", padx=3)
+        ttk.Button(header, text="Vertical monitor", command=lambda: self.display.open("vertical")).pack(side="right", padx=3)
+        ttk.Button(header, text="Horizontal monitor", command=lambda: self.display.open("horizontal")).pack(side="right", padx=3)
         self.connection_label = ttk.Label(shell, text="Connecting...")
         # Connection state is shown in the unified status line.
         self.alert_status = ttk.Label(shell, text="No active alerts", wraplength=680)
@@ -747,13 +743,16 @@ class WattCycleMonitor:
             return tabs.add(name)
         main = page("Overview")
         diagnostics = page("Battery")
-        history = page("History")
-        automation = page("Automation")
+        energy = page("Energy")
+        health = page("Health")
+        automation = page("Astronomy")
+        history = automation
         settings = page("Settings")
         self.root.geometry("820x690")
         self.root.minsize(740, 650)
         self.modern_overview = ModernOverview(main, self)
         self.display.build_graph(self.modern_overview.graph_parent)
+        self.core_pages = CorePages(energy,health,self,DB_PATH,CONFIG)
 
         # Automatic session summary
         session = ttk.LabelFrame(
@@ -996,7 +995,7 @@ class WattCycleMonitor:
         ttk.Button(settings, text="Telemetry, protection and logging settings", command=self.show_settings).pack(anchor="w", pady=8)
         ttk.Button(settings, text="Switch dark/light theme", command=self.display.toggle_theme).pack(anchor="w", pady=4)
         ttk.Button(settings, text="Advanced troubleshooting", command=self.show_power_diagnostics).pack(anchor="w", pady=4)
-        ttk.Label(settings, text="Slim display preferences are available from its right-click menu.", wraplength=620).pack(anchor="w", pady=8)
+        ttk.Label(settings, text="Compact monitor preferences are available from its right-click menu.", wraplength=620).pack(anchor="w", pady=8)
         self.footer = ttk.Label(
             shell,
             text="Waiting for battery...",
@@ -1828,6 +1827,8 @@ class WattCycleMonitor:
         self.primary_runtime.config(text=s["runtime"])
         self.modern_overview.refresh(s, self.display.dark, NINA_CRITICAL_SOC)
         self.modern_navigation.set_theme(self.display.dark)
+        if self.modern_navigation.active in ("Energy","Health") and time.monotonic()-self.core_pages.last>=30:
+            self.core_pages.refresh()
         self.reserve_runtime.config(text=f"Until {NINA_CRITICAL_SOC}% SOC reserve: {s['reserve']}")
         if not s["fresh"]:
             self.connection_label.config(text="Disconnected / waiting for fresh telemetry")
