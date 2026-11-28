@@ -1,0 +1,69 @@
+name: Windows installer
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the versioned beta release (main only)
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install build dependencies
+        run: python -m pip install -r requirements.txt pyinstaller
+      - name: Package Windows executable
+        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name WattCycle --collect-all customtkinter --collect-all wattcycle_ble --collect-submodules bleak WattCycle_Battery_Utility.pyw
+      - name: Check packaged startup imports
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "$PWD\dist\WattCycle.exe" -ArgumentList "--version" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Packaged startup failed: $($p.ExitCode)" }
+      - name: Build installer and checksum
+        shell: pwsh
+        run: |
+          $version = python -c "from wattcycle_version import VERSION; print(VERSION)"
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (!(Test-Path $iscc)) { choco install innosetup -y --no-progress; if ($LASTEXITCODE -ne 0) { throw "Inno Setup install failed" } }
+          & $iscc "/DAppVersion=$version" installer\WattCycle.iss
+          if ($LASTEXITCODE -ne 0) { throw "Installer build failed" }
+          $hash = (Get-FileHash dist\installer\WattCycle-Setup.exe -Algorithm SHA256).Hash.ToLower()
+          Set-Content -Path dist\installer\WattCycle-Setup.exe.sha256 -Value "$hash  WattCycle-Setup.exe" -Encoding ascii
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WattCycle-Windows
+          path: |
+            dist/WattCycle.exe
+            dist/installer/WattCycle-Setup.exe
+            dist/installer/WattCycle-Setup.exe.sha256
+  publish:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: WattCycle-Windows
+          path: packaged
+      - name: Publish beta assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = python -c "from wattcycle_version import VERSION; print(VERSION)"
+          $tag = "v$version"
+          gh release create $tag packaged/WattCycle.exe packaged/installer/WattCycle-Setup.exe packaged/installer/WattCycle-Setup.exe.sha256 --target "${{ github.sha }}" --title "WattCycle $version" --prerelease --generate-notes
+          if ($LASTEXITCODE -ne 0) { throw "Release publication failed" }
