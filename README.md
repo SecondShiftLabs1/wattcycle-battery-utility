@@ -2,7 +2,7 @@
 
 **Windows monitoring, logging, analytics, control, and automation for compatible WattCycle Bluetooth LiFePO4 batteries.**
 
-> **Public beta — v0.2.0-beta.** This repository is derived from a hardware-tested personal prototype, but the cleaned discovery/configuration path still needs clean-system validation. Do not rely on it for unattended power control until you have tested it with your own equipment.
+> **Public beta — v0.3.0-beta.1.** This repository is derived from a hardware-tested personal prototype, but the cleaned discovery/configuration path still needs clean-system validation. Do not rely on it for unattended power control until you have tested it with your own equipment.
 
 WattCycle Battery Utility is a **general-purpose battery application first**. It is intended for portable power, camping, RV/van systems, solar experiments, radio equipment, backup power, astrophotography, and other uses of compatible WattCycle/XDZN Bluetooth batteries.
 
@@ -27,11 +27,15 @@ ASCOM Alpaca / N.I.N.A. support is optional.
 
 ## Display modes
 
-The public beta includes a modern CustomTkinter dashboard, dark/light themes, live telemetry charts, and two slim overlays. Select Horizontal slim or Vertical slim in the header. Double-click the overlay to restore the full dashboard; right-click for mode, opacity, always-on-top, metric selection, theme and exit. Drag to reposition; positions and preferences are remembered. Slim mode does not stop monitoring or logging. Stale readings are identified as last known. Test on Windows before relying on the new interface unattended.
+The public beta includes a modern CustomTkinter dashboard, dark/light themes, live telemetry charts, and two slim overlays. Select Horizontal monitor or Vertical monitor in the header. Single-click the overlay to restore the full dashboard; right-click for mode, opacity, always-on-top, metric selection, theme and exit. Drag to reposition; positions and preferences are remembered. Slim mode does not stop monitoring or logging. Stale readings are identified as last known. Test on Windows before relying on the new interface unattended.
 
 The redesigned dashboard uses CustomTkinter. Existing installations must run `python -m pip install -r requirements.txt` before launching this build.
 
-## First-run setup
+## Windows installer and updates
+
+Download `WattCycle-Setup.exe` (recommended) or the portable `WattCycle.exe` from [GitHub Releases](https://github.com/SecondShiftLabs1/wattcycle-battery-utility/releases). Packaged builds do not require Python. The installer is currently unsigned. Settings and telemetry remain in their existing local data locations. In Settings, select Check for updates to download and verify a newer installer; installation requires confirmation and temporarily interrupts monitoring and ASCOM telemetry.
+
+## First-run setup (source distribution)
 
 1. Install Python 3.11+ on Windows.
 2. Install dependencies with `py -m pip install -r requirements.txt` (or `python -m pip install -r requirements.txt` if your installation uses `python`).
@@ -87,7 +91,7 @@ AI-generated code can contain defects. Review the source and validate safety-cri
 
 ## Status
 
-**0.2.0-beta** — charging and discharge commands and telemetry have been tested on the listed hardware. The modern UI and slim modes are available for public testing. Clean-system installation, additional battery firmware compatibility, and unattended automation validation remain ongoing. This is a beta source distribution, not a certified safety controller or standalone Windows installer.
+**0.3.0-beta.1** — charging and discharge commands and telemetry have been tested on the listed hardware. The modern UI and slim modes are available for public testing. Clean-system installation, additional battery firmware compatibility, and unattended automation validation remain ongoing. This is a beta application, not a certified safety controller. Clean-system installer and update testing are ongoing.
 
 ## License
 
