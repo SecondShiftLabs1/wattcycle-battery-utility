@@ -2,7 +2,7 @@
 
 **Windows monitoring, logging, analytics, control, and automation for compatible WattCycle Bluetooth LiFePO4 batteries.**
 
-> **Public alpha / development build.** This repository is derived from a hardware-tested personal prototype, but the cleaned discovery/configuration path still needs clean-system validation. Do not rely on it for unattended power control until you have tested it with your own equipment.
+> **Public beta — v0.2.0-beta.** This repository is derived from a hardware-tested personal prototype, but the cleaned discovery/configuration path still needs clean-system validation. Do not rely on it for unattended power control until you have tested it with your own equipment.
 
 WattCycle Battery Utility is a **general-purpose battery application first**. It is intended for portable power, camping, RV/van systems, solar experiments, radio equipment, backup power, astrophotography, and other uses of compatible WattCycle/XDZN Bluetooth batteries.
 
@@ -27,14 +27,14 @@ ASCOM Alpaca / N.I.N.A. support is optional.
 
 ## Display modes
 
-The UI development build includes a tabbed dashboard, dark/light themes, live telemetry charts, and two slim overlays. Select Horizontal slim or Vertical slim in the header. Double-click the overlay to restore the full dashboard; right-click for mode, opacity, always-on-top, metric selection, theme and exit. Drag to reposition; positions and preferences are remembered. Slim mode does not stop monitoring or logging. Stale readings are identified as last known. Test on Windows before relying on the new interface unattended.
+The public beta includes a modern CustomTkinter dashboard, dark/light themes, live telemetry charts, and two slim overlays. Select Horizontal slim or Vertical slim in the header. Double-click the overlay to restore the full dashboard; right-click for mode, opacity, always-on-top, metric selection, theme and exit. Drag to reposition; positions and preferences are remembered. Slim mode does not stop monitoring or logging. Stale readings are identified as last known. Test on Windows before relying on the new interface unattended.
 
 The redesigned dashboard uses CustomTkinter. Existing installations must run `python -m pip install -r requirements.txt` before launching this build.
 
 ## First-run setup
 
 1. Install Python 3.11+ on Windows.
-2. Install dependencies with `pip install -r requirements.txt`.
+2. Install dependencies with `py -m pip install -r requirements.txt` (or `python -m pip install -r requirements.txt` if your installation uses `python`).
 3. Start `WattCycle_Battery_Utility.pyw`.
 4. Select a compatible battery found by BLE discovery.
 5. Configuration is stored locally in `%APPDATA%\WattCycleBatteryUtility\config.json`.
@@ -47,7 +47,7 @@ No personal battery MAC address, serial number, or machine-specific identifier i
 
 Enabling MOS control can remove power from connected equipment immediately. Test with non-critical loads first. If a computer, mount, storage device, network device, heater controller, or other equipment is powered by the battery, Discharge MOS OFF can cause an abrupt shutdown.
 
-The Alpaca service is intended for trusted local networks. This alpha does not provide authentication or TLS; do not expose it directly to the public Internet.
+The Alpaca service is intended for trusted local networks. This beta does not provide authentication or TLS; do not expose it directly to the public Internet.
 
 ## ASCOM Alpaca / N.I.N.A.
 
@@ -87,7 +87,7 @@ AI-generated code can contain defects. Review the source and validate safety-cri
 
 ## Status
 
-**0.1.0-alpha** — the personal prototype is hardware-tested; the repository-style public build remains pre-release until its cleaned first-run/configuration workflow receives clean-system testing.
+**0.2.0-beta** — charging and discharge commands and telemetry have been tested on the listed hardware. The modern UI and slim modes are available for public testing. Clean-system installation, additional battery firmware compatibility, and unattended automation validation remain ongoing. This is a beta source distribution, not a certified safety controller or standalone Windows installer.
 
 ## License
 
