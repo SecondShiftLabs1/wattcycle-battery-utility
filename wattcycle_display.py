@@ -111,7 +111,6 @@ class Display:
         self.canvas.bind("<ButtonPress-1>", self.start_drag)
         self.canvas.bind("<B1-Motion>", self.move)
         self.canvas.bind("<ButtonRelease-1>", self.end_drag)
-        self.canvas.bind("<Double-Button-1>", lambda e: self.open("full"))
         self.canvas.bind("<Button-3>", self.menu)
         win.bind("<Escape>", lambda e: self.open("full"))
         self.root.withdraw()
@@ -124,14 +123,23 @@ class Display:
 
     def start_drag(self,e):
         self.drag = (e.x_root-self.slim.winfo_x(),e.y_root-self.slim.winfo_y())
+        self.press_origin = (e.x_root,e.y_root)
+        self.dragged = False
 
     def move(self,e):
         if self.drag and self.slim:
+            if not self.dragged and max(abs(e.x_root-self.press_origin[0]),abs(e.y_root-self.press_origin[1]))<5:
+                return
+            self.dragged = True
             x,y = e.x_root-self.drag[0],e.y_root-self.drag[1]
             self.slim.geometry(f"{x:+d}{y:+d}")
 
     def end_drag(self,e):
-        if not self.slim: return
+        if not self.slim or self.drag is None: return
+        self.drag = None
+        if not self.dragged:
+            self.open("full")
+            return
         win=self.slim
         x,y=win.winfo_x(),win.winfo_y()
         right=win.winfo_screenwidth()-win.winfo_width()
@@ -148,7 +156,7 @@ class Display:
 
     def menu(self,e):
         menu=tk.Menu(self.slim,tearoff=False)
-        for name,mode in (("Full dashboard","full"),("Horizontal slim","horizontal"),("Vertical slim","vertical")):
+        for name,mode in (("Full dashboard","full"),("Horizontal monitor","horizontal"),("Vertical monitor","vertical")):
             menu.add_command(label=name,command=lambda m=mode:self.open(m))
         menu.add_command(label="Toggle always on top",command=self.topmost)
         menu.add_command(label="Opacity...",command=self.opacity)
@@ -196,7 +204,7 @@ class Display:
             label(88,14,status,10,color)
             label(365,14,"↗",13,fg,"e")
             label(88,35,"  ·  ".join(s.get(k,"--") for k in metrics[:3]),11)
-            label(10,58,f"{s.get('direction','')}  |  "+(f"Age {max(0,int(s['age']))}s" if s["age"] is not None else "No data")+"  |  Right-click for options",9,muted)
+            label(10,58,f"{s.get('direction','')}  |  "+(f"Age {max(0,int(s['age']))}s" if s["age"] is not None else "No data")+"  |  Click to open",9,muted)
         else:
             label(10,15,"WATTCYCLE",10,fg)
             label(155,15,"↗",13,fg,"e")
@@ -207,7 +215,7 @@ class Display:
                 label(10,106+i*27,k.title(),9,muted)
                 label(156,106+i*27,s.get(k,"--"),11,ink,"e")
             label(10,305,status,9,color)
-            label(10,319,"Right-click for options",8,muted)
+            label(10,319,"Click to open · Right-click options",8,muted)
 
     def update(self):
         if self.slim is not None:
