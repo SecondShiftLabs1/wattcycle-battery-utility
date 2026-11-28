@@ -18,6 +18,16 @@ from wattcycle_display import Display, snapshot
 from wattcycle_modern import ModernOverview, ModernNavigation
 from wattcycle_energy import EventLog
 from wattcycle_core_pages import CorePages
+from wattcycle_version import VERSION
+from wattcycle_update import find_update, download_update
+import wattcycle_ble_scan
+
+# Frozen executable also serves as the isolated discovery helper.
+if '--ble-scan' in sys.argv:
+    sys.argv.remove('--ble-scan')
+    sys.exit(wattcycle_ble_scan.main())
+if '--version' in sys.argv:
+    sys.exit(0)
 
 CONFIG = load_config()
 ADDRESS = CONFIG.get("battery_address", "")
@@ -81,7 +91,7 @@ class WattCycleMonitor:
 
     def __init__(self, root):
         self.root = root
-        self.root.title("WattCycle Battery Utility - v0.2.0 Beta")
+        self.root.title(f"WattCycle Battery Utility - {VERSION}")
         self.root.geometry("800x780")
         self.root.minsize(720, 620)
 
@@ -268,7 +278,7 @@ class WattCycleMonitor:
             found.clear()
 
             scanner_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wattcycle_ble_scan.py")
-            if not os.path.exists(scanner_path):
+            if not getattr(sys,"frozen",False) and not os.path.exists(scanner_path):
                 finish_scan("Scanner helper wattcycle_ble_scan.py is missing from the application folder.")
                 return
 
@@ -284,7 +294,7 @@ class WattCycleMonitor:
             status.set("Starting Bluetooth LE scan...")
             try:
                 proc = subprocess.Popen(
-                    [sys.executable, scanner_path, "--timeout", "10", "--output", output_path],
+                    ([sys.executable, "--ble-scan"] if getattr(sys,"frozen",False) else [sys.executable, scanner_path]) + ["--timeout", "10", "--output", output_path],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
@@ -995,6 +1005,8 @@ class WattCycleMonitor:
         ttk.Button(settings, text="Telemetry, protection and logging settings", command=self.show_settings).pack(anchor="w", pady=8)
         ttk.Button(settings, text="Switch dark/light theme", command=self.display.toggle_theme).pack(anchor="w", pady=4)
         ttk.Button(settings, text="Advanced troubleshooting", command=self.show_power_diagnostics).pack(anchor="w", pady=4)
+        ttk.Button(settings, text="Check for updates", command=self.check_updates).pack(anchor="w", pady=4)
+        ttk.Label(settings,text=f"Installed version: {VERSION}").pack(anchor="w")
         ttk.Label(settings, text="Compact monitor preferences are available from its right-click menu.", wraplength=620).pack(anchor="w", pady=8)
         self.footer = ttk.Label(
             shell,
@@ -1002,6 +1014,56 @@ class WattCycleMonitor:
             font=("Segoe UI", 8)
         )
         self.footer.pack(pady=(8, 0))
+
+    def check_updates(self):
+        if getattr(self,"update_busy",False):
+            return
+        self.update_busy=True
+        self.update_result=None
+        def worker():
+            try:
+                self.update_result=("checked",find_update())
+            except Exception as exc:
+                self.update_result=("error",str(exc))
+        threading.Thread(target=worker,daemon=True).start()
+        self.root.after(150,self.poll_update)
+
+    def poll_update(self):
+        result=self.update_result
+        if result is None:
+            self.root.after(150,self.poll_update)
+            return
+        self.update_busy=False
+        status,value=result
+        if status=="error":
+            messagebox.showerror("WattCycle update",value,parent=self.root)
+        elif status=="checked":
+            if value is None:
+                messagebox.showinfo("WattCycle update","No newer packaged release is available.",parent=self.root)
+                return
+            if not messagebox.askyesno("WattCycle update",f"Version {value[1]} is available. Download the verified installer? Monitoring continues during download.",parent=self.root):
+                return
+            self.update_busy=True
+            self.update_result=None
+            def worker():
+                try:
+                    self.update_result=("downloaded",download_update(value))
+                except Exception as exc:
+                    self.update_result=("error",str(exc))
+            threading.Thread(target=worker,daemon=True).start()
+            self.root.after(150,self.poll_update)
+        elif status=="downloaded":
+            if not messagebox.askyesno("Install WattCycle update","The installer is downloaded and its checksum matches. Installing will stop monitoring temporarily, including N.I.N.A. telemetry. Only proceed when your equipment is safe to leave unmonitored. Install now?",parent=self.root):
+                return
+            if self.control_busy or self.pending_command is not None or self.unverified_control is not None:
+                messagebox.showwarning("WattCycle update","Wait until the battery control operation has completed.",parent=self.root)
+                return
+            try:
+                subprocess.Popen([str(value)])
+            except OSError as exc:
+                messagebox.showerror("WattCycle update",str(exc),parent=self.root)
+                return
+            self.close()
 
     def show_settings(self):
         global CONFIG, REFRESH_SECONDS, LOG_INTERVAL, SESSION_START_AMPS
